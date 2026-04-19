@@ -23,24 +23,33 @@ def list_ollama_models(ollama_url: str) -> list[str]:
 
 
 def _stream(ollama_url: str, model: str, prompt: str) -> Generator[str, None, None]:
-    resp = requests.post(
-        f"{ollama_url}{_CHAT_PATH}",
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": True,
-            "options": _OPTIONS,
-        },
-        timeout=600,
-        stream=True,
-    )
-    resp.raise_for_status()
-    for line in resp.iter_lines():
-        if line:
-            chunk = json.loads(line)
-            content = chunk.get("message", {}).get("content", "")
-            if content:
-                yield content
+    try:
+        resp = requests.post(
+            f"{ollama_url}{_CHAT_PATH}",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+                "options": _OPTIONS,
+            },
+            timeout=600,
+            stream=True,
+        )
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if line:
+                chunk = json.loads(line)
+                content = chunk.get("message", {}).get("content", "")
+                if content:
+                    yield content
+    except requests.exceptions.ConnectionError:
+        yield "\n\n> **ERROR:** Cannot reach Ollama. Confirm it is running at the configured URL."
+    except requests.exceptions.Timeout:
+        yield "\n\n> **ERROR:** Ollama request timed out. Try a smaller model or increase context."
+    except requests.exceptions.HTTPError as exc:
+        yield f"\n\n> **ERROR:** Ollama returned HTTP {exc.response.status_code}. Check the model name."
+    except Exception as exc:
+        yield f"\n\n> **ERROR:** {exc}"
 
 
 def generate_learning_outcomes(
@@ -54,6 +63,7 @@ def generate_learning_outcomes(
     ollama_url: str,
     model: str,
     course_hours: int | None = None,
+    reputation_context: str = "",
 ) -> Generator[str, None, None]:
     is_ce = program_level == "Continuous Education"
     hours_line = f"TOTAL CONTACT HOURS: {course_hours}" if is_ce and course_hours else ""
@@ -87,6 +97,8 @@ Number each one. Use action verbs (analyze, design, apply, evaluate...).
 A concise description of the graduate: knowledge areas, technical skills, professional values,
 and the contexts in which they will work."""
 
+    reputation_section = f"\n=== INSTITUTIONAL REPUTATION & PUBLIC PERCEPTION ===\n{reputation_context}" if reputation_context else ""
+
     prompt = f"""You are an expert curriculum designer for higher education.
 Write entirely in {language}.
 
@@ -103,13 +115,14 @@ FIELD: {program_scope}
 {accreditation_context}
 
 === INSTITUTIONAL CONTEXT ===
-{institutional_context}
+{institutional_context}{reputation_section}
 
 ---
 Generate the following sections in {language}:
 {outcomes_instruction}
 
-Align all content tightly with job market demand, accreditation requirements, and institutional identity."""
+Align all content tightly with job market demand, accreditation requirements, institutional identity,
+and public reputation signals."""
 
     yield from _stream(ollama_url, model, prompt)
 
@@ -200,11 +213,15 @@ Generate in {language}:
 # Competency Map
 
 A markdown table where:
-- Rows = courses (Course Code + Name)
-- Columns = SLO numbers (abbreviated as SLO1, SLO2, ...)
+- Rows = courses (Course Code + Name in the first column)
+- Columns = SLO numbers (SLO1, SLO2, ...)
 - Cells = I (Introduced), D (Developed), A (Assessed/Mastered), or blank
 
-Keep the table readable. Group courses by semester.
+IMPORTANT formatting rules:
+- Use short course codes only in column 1 (e.g. "CS101 Intro Programming"), keep under 35 chars
+- Use only SLO abbreviations in headers (SLO1, SLO2, ...)
+- Group courses by semester with a separator row: | **Semester N** | | | ...
+- Keep every cell short: I, D, A, or blank only
 
 # Curriculum Threads
 Identify 3-5 thematic threads running through the curriculum (e.g. "Technical Core",

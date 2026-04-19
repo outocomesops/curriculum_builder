@@ -45,7 +45,17 @@ def build_accreditation_context(agencies: list[dict]) -> str:
     return "\n\n".join(sections)
 
 
-def build_institutional_context(doc_summaries: list[dict]) -> str:
+def build_institutional_context(consolidated_summary: str, doc_summaries: list[dict] | None = None) -> str:
+    """
+    Returns the consolidated institutional profile (preferred) or falls back
+    to concatenating individual document summaries if consolidation hasn't run.
+    """
+    if consolidated_summary and consolidated_summary.strip():
+        return f"Consolidated institutional profile:\n\n{consolidated_summary}"
+
+    # Fallback: join individual summaries (legacy / pre-consolidation path)
+    if not doc_summaries:
+        return "No institutional documentation provided."
     useful = [d for d in doc_summaries if d.get("has_content") and d.get("summary")]
     if not useful:
         return "No institutional documentation provided."
@@ -54,3 +64,9 @@ def build_institutional_context(doc_summaries: list[dict]) -> str:
     for d in useful:
         parts.append(f"\n--- Source: {d['filename']} ---\n{d['summary']}")
     return "\n".join(parts)
+
+
+def build_reputation_context(reputation_summary: str) -> str:
+    if not reputation_summary or not reputation_summary.strip():
+        return "No public reputation data available."
+    return f"Public perception & institutional reputation:\n\n{reputation_summary}"

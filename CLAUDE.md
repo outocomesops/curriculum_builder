@@ -128,3 +128,35 @@ outputs/
 - Test end-to-end with a real `jobs.db` + a quality_definition agency + a sample PDF
 - Focus on `app.py` tab 3 (Generate) and `generator/curriculum_gen.py` for any prompt tuning
 - Consider adding a progress bar across the 4 generation steps
+
+---
+
+## Session Log — 2026-04-19
+
+### Changes Made
+- **NotebookLM reputation research** — `loaders/reputation_loader_nlm.py` uses `nlm` CLI (subprocess) to create a notebook, add a text seed + optional URLs, query for reputation, and return a structured summary; moved to Tab 1 (Sources & Setup)
+- **PDF scraper/downloader** — `loaders/pdf_downloader.py` scrapes PDF links from any webpage and downloads them to a local folder; integrated into Tab 1 institutional docs section with preview + multiselect
+- **Fixed data paths** — `config.py` now exposes `JOB_MARKET_DB`, `QUALITY_SOURCES_DIR`, `INSTITUTIONAL_DOCS_DIR`, and `INSTITUTIONS_DIR` as fixed sibling-project paths; Tab 1 no longer asks for file paths
+- **Per-tab LLM model selectors** — model dropdown moved out of sidebar into Tab 2 (`model_ctx`) and Tab 3 (`model_gen`) independently; sidebar only shows available model count
+- **Institutional summary cache** — `utils/institutional_cache.py` fingerprints the doc set and saves the consolidated summary to `outcomesops_institutions/{institution}/institutional_summary.json`; Tab 2 detects a valid cache and offers one-click load, skipping re-summarisation
+- **Restored doc_summarizer.py** — file was corrupted mid-session (`def 0(` syntax error + truncation); restored with all four functions: `summarize_doc`, `batch_summarize`, `consolidate_summaries`, `summarize_reputation`
+- **NotebookLM auth** — ran `nlm login` to authenticate; fixed empty-notebook query error by always adding a text seed source before querying
+
+### Decisions & Rationale
+- `nlm` CLI called via subprocess rather than importing internal library — the package has no public Python API; subprocess is stable and matches how the MCP server uses it
+- Text seed source added unconditionally before NLM query — NotebookLM requires ≥1 source; Reddit auto-URLs were blocked by Reddit and dropped
+- Cache fingerprint uses `(filename, char_count)` pairs hashed with MD5 — lightweight, no file re-read required; invalidates naturally when files are added/replaced
+- Reputation section moved to Tab 1 so all data-gathering happens before context review, matching the intended workflow
+- Per-tab model selectors allow using a faster/cheaper model for doc summarisation and a more capable one for curriculum generation
+
+### Known Issues / TODOs
+- DuckDuckGo reputation option uses Ollama (local LLM); requires Ollama running — NotebookLM option has no such dependency
+- `nlm login` must be re-run if auth cookies expire (session-based); no auto-refresh in the app
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+- Competency map rendered as plain text — a table renderer would improve readability
+
+### Next Session Starting Point
+- Test full pipeline end-to-end: load jobs.db → quality standards → download PDFs from URL → reputation research → generate curriculum → export PDF
+- Focus on `generator/curriculum_gen.py` prompt tuning once real data is flowing
+- Consider caching the reputation summary similarly to institutional summary (same pattern in `utils/`)
+- `outcomesops_institutions/` folder structure: verify cache files are written correctly on first consolidated run
