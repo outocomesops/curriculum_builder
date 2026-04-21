@@ -64,6 +64,8 @@ def generate_learning_outcomes(
     model: str,
     course_hours: int | None = None,
     reputation_context: str = "",
+    program_specs_context: str = "",
+    deep_research_context: str = "",
 ) -> Generator[str, None, None]:
     is_ce = program_level == "Continuous Education"
     hours_line = f"TOTAL CONTACT HOURS: {course_hours}" if is_ce and course_hours else ""
@@ -98,6 +100,8 @@ A concise description of the graduate: knowledge areas, technical skills, profes
 and the contexts in which they will work."""
 
     reputation_section = f"\n=== INSTITUTIONAL REPUTATION & PUBLIC PERCEPTION ===\n{reputation_context}" if reputation_context else ""
+    specs_section = f"\n=== PROGRAM SPECIFICATION MATERIALS (stakeholder documents) ===\n{program_specs_context}" if program_specs_context else ""
+    research_section = f"\n{deep_research_context}" if deep_research_context and "No deep research" not in deep_research_context else ""
 
     prompt = f"""You are an expert curriculum designer for higher education.
 Write entirely in {language}.
@@ -115,14 +119,14 @@ FIELD: {program_scope}
 {accreditation_context}
 
 === INSTITUTIONAL CONTEXT ===
-{institutional_context}{reputation_section}
+{institutional_context}{reputation_section}{specs_section}{research_section}
 
 ---
 Generate the following sections in {language}:
 {outcomes_instruction}
 
 Align all content tightly with job market demand, accreditation requirements, institutional identity,
-and public reputation signals."""
+public reputation signals, and the deep research intelligence above."""
 
     yield from _stream(ollama_url, model, prompt)
 
@@ -137,6 +141,8 @@ def generate_course_list(
     ollama_url: str,
     model: str,
     course_hours: int | None = None,
+    program_specs_context: str = "",
+    deep_research_context: str = "",
 ) -> Generator[str, None, None]:
     is_ce = program_level == "Continuous Education"
 
@@ -179,7 +185,8 @@ PROGRAM: {program_name}  |  LEVEL: {program_level}
 
 === ACCREDITATION CURRICULUM REQUIREMENTS ===
 {accreditation_context}
-
+{f"=== PROGRAM SPECIFICATION MATERIALS ===" + chr(10) + program_specs_context if program_specs_context else ""}
+{deep_research_context if deep_research_context and "No deep research" not in deep_research_context else ""}
 ---
 Generate a full module/course list in {language}.
 

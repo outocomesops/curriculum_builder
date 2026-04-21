@@ -160,3 +160,40 @@ outputs/
 - Focus on `generator/curriculum_gen.py` prompt tuning once real data is flowing
 - Consider caching the reputation summary similarly to institutional summary (same pattern in `utils/`)
 - `outcomesops_institutions/` folder structure: verify cache files are written correctly on first consolidated run
+
+---
+
+## Session Log — 2026-04-20
+
+### Changes Made
+- **Program Specifications loader** — `loaders/program_specs_loader.py` extracts content from any file type in a folder: TXT/MD/CSV (direct read), PDF (pdfplumber), DOCX (python-docx including tables), XLSX/XLS (openpyxl, all sheets), PPTX/PPT (python-pptx, all slide text), images via Ollama vision API (base64), video/audio via openai-whisper (if installed)
+- **Program Specifications UI** — new section in Tab 1 (Sources & Setup) between quality standards and institutional docs: folder path input, vision model selector (picks from loaded Ollama models), progress bar during loading, file-by-file results with type icons
+- **`build_program_specs_context()`** — added to `generator/prompt_builder.py`; formats extracted specs into a prompt-injectable string (truncates to 12,000 chars)
+- **Deep Research tab** — new Tab 5 in `app.py` backed by `loaders/deep_research_loader.py`
+- **`MODULE_REGISTRY`** — 5 research modules: Legal Framework (⚖️), Competitive Landscape (🏆), Student Market & Employer Perception (🎓), Institutional History & Identity (🏛️), Strategic Analysis / Game Theory (♟️)
+- **`run_research_module()`** — one NLM notebook per module (created → seeded → queried → deleted); never raises; returns `{status, answer, error, notebook_id, sources_added}`
+- **`build_deep_research_context()`** — formats successful module results into `=== DEEP RESEARCH INTELLIGENCE ===` prompt block
+- **Tab 5 UI** — module checkboxes (2-column grid with tooltips), extra seed URLs textarea, source/query timeouts, cleanup toggle, per-module `st.status()` live progress, results with metric row + expandable answers, context preview
+- **Generator integration** — `deep_research_context` injected into `generate_learning_outcomes` and `generate_course_list` prompts; visible in Tab 2 context preview
+- **Added to `requirements.txt`**: `openpyxl>=3.1`, `python-pptx>=0.6`
+- All 125 existing tests pass
+
+### Decisions & Rationale
+- One NLM notebook per research module (not one shared notebook): module isolation prevents context bleed between topics (e.g. legal answers drifting into competitive analysis), and one module failure cannot kill others
+- `run_research_module` never raises by contract — the calling loop in Tab 5 always continues to the next module; errors surface in the UI expander for that module only
+- Program specs loader uses Ollama vision API for images (reuses existing Ollama integration) rather than adding a tesseract dependency; gracefully skips if no vision model is selected
+- Video transcription via whisper is optional (not in requirements.txt) — requires ffmpeg; app degrades gracefully with a clear error message
+- `MODULE_REGISTRY` is the single extensibility point: adding a 6th research module requires only appending one dict to the list; all UI and context assembly code renders from it dynamically
+
+### Known Issues / TODOs
+- `st.status()` requires Streamlit ≥ 1.28; already met (project uses ≥ 1.35) — no concern
+- Video/audio transcription (whisper) not installed by default; users must `pip install openai-whisper` + have `ffmpeg` on PATH
+- Deep research results are not cached to disk (unlike institutional summary); closing the browser loses them — consider adding a JSON cache in `outcomesops_institutions/{institution}/deep_research_cache.json`
+- No per-module re-run button yet; users re-run by unchecking succeeded modules and clicking Run again
+- Competency map and syllabi generation do not receive deep research context (intentional — they are downstream derivations; add if needed)
+
+### Next Session Starting Point
+- Test full pipeline end-to-end: Tab 1 → load job skills + quality standards + program specs folder → Tab 5 → run 1–2 research modules → Tab 3 → generate learning outcomes and verify deep research context appears in the prompt
+- Focus on `loaders/deep_research_loader.py` query tuning once real institution data flows through NLM
+- Consider adding disk cache for deep research results (`utils/deep_research_cache.py`, same pattern as `utils/institutional_cache.py`)
+- Consider per-module re-run button in Tab 5 results section

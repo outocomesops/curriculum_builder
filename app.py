@@ -26,6 +26,8 @@ from utils.institutional_cache import load_cache, save_cache, cache_path
 from loaders.job_loader import get_available_queries, load_skills_from_db, load_skills_from_csv
 from loaders.quality_loader import get_all_scopes, load_agencies_with_quality
 from loaders.doc_loader import load_institutional_docs
+from loaders.program_specs_loader import load_program_specs
+from loaders.deep_research_loader import MODULE_REGISTRY, run_research_module, build_deep_research_context
 from loaders.pdf_downloader import scrape_pdf_links, download_pdfs
 from loaders.reputation_loader import fetch_reputation_snippets
 from loaders.reputation_loader_nlm import fetch_reputation_via_notebooklm
@@ -40,6 +42,7 @@ from generator.prompt_builder import (
     build_accreditation_context,
     build_institutional_context,
     build_reputation_context,
+    build_program_specs_context,
 )
 from generator.curriculum_gen import (
     list_ollama_models,
@@ -81,6 +84,8 @@ _DEFAULTS = {
     "reputation_summary": "",
     "reputation_nlm_notebook_id": "",
     "_preview_pdf_links": [],
+    "program_specs_docs": [],
+    "deep_research_results": {},
     "learning_outcomes": "",
     "course_list": "",
     "competency_map": "",
@@ -138,11 +143,12 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_sources, tab_context, tab_generate, tab_export = st.tabs([
+tab_sources, tab_context, tab_generate, tab_export, tab_research = st.tabs([
     "1  Sources & Setup",
     "2  Context Preview",
     "3  Generate",
     "4  Export",
+    "5  Deep Research",
 ])
 
 
@@ -269,6 +275,87 @@ with tab_sources:
                 st.caption(f"✅ {len(st.session_state['agencies'])} agency standard(s) loaded")
     else:
         st.warning(f"Quality standards folder not found at `{QUALITY_SOURCES_DIR}`.")
+
+    st.divider()
+
+    # ---- Program Specifications ----
+    st.subheader("Program Specifications")
+    st.caption(
+        "Point to a folder containing **any** stakeholder materials: "
+        "Excel, Word, PDF, PowerPoint, images (PNG/JPG/…), videos, audio, CSV, TXT. "
+        "The app will extract as much content as possible from every file."
+    )
+
+    specs_folder = st.text_input(
+        "Program specs folder",
+        placeholder=r"C:\Users\...\program_specifications",
+        key="specs_folder",
+        help="All sub-folders are scanned recursively.",
+    )
+
+    # Vision model selector (only shown when images may be present)
+    _vision_model_options = ["(none — skip images)"] + (available_models if available_models else [])
+    specs_vision_model = st.selectbox(
+        "Vision model for image files",
+        options=_vision_model_options,
+        key="specs_vision_model",
+        help="Select a vision-capable model (e.g. llava, gemma3) to extract text from images. "
+             "Leave as '(none)' to skip image files.",
+    )
+    _vision_model = None if specs_vision_model.startswith("(none") else specs_vision_model
+
+    col_specs1, col_specs2 = st.columns([1, 3])
+    with col_specs1:
+        _load_specs_disabled = not specs_folder
+        if st.button("Load Program Specs", type="primary", disabled=_load_specs_disabled, key="btn_load_specs"):
+            _prog_bar = st.progress(0, "Scanning folder…")
+
+            def _specs_progress(i, total, name):
+                pct = int((i + 1) / max(total, 1) * 100)
+                _prog_bar.progress(pct, f"Processing: {name}")
+
+            with st.spinner("Extracting content from all files…"):
+                _specs_docs = load_program_specs(
+                    specs_folder,
+                    ollama_url=ollama_url,
+                    vision_model=_vision_model,
+                    progress_callback=_specs_progress,
+                )
+            _prog_bar.empty()
+
+            st.session_state["program_specs_docs"] = _specs_docs
+
+            _ok_s   = [d for d in _specs_docs if not d["error"] and d["char_count"] > 0]
+            _warn_s  = [d for d in _specs_docs if not d["error"] and d["char_count"] == 0]
+            _err_s   = [d for d in _specs_docs if d["error"]]
+
+            if _ok_s:
+                st.success(f"Extracted content from {len(_ok_s)} file(s).")
+            if not _specs_docs:
+                st.warning(f"No supported files found in `{specs_folder}`.")
+
+    with col_specs2:
+        _loaded_specs = st.session_state.get("program_specs_docs", [])
+        if _loaded_specs:
+            _ok_s  = [d for d in _loaded_specs if not d["error"] and d["char_count"] > 0]
+            _err_s = [d for d in _loaded_specs if d["error"]]
+            st.caption(f"✅ {len(_ok_s)} file(s) loaded  |  ❌ {len(_err_s)} error(s)")
+
+    if st.session_state.get("program_specs_docs"):
+        with st.expander("View loaded program spec files", expanded=False):
+            _type_icons = {
+                "text": "📄", "spreadsheet": "📊", "pdf": "📑",
+                "word": "📝", "excel": "📊", "presentation": "📋",
+                "image": "🖼️", "video": "🎬", "audio": "🎵", "unknown": "❓",
+            }
+            for d in st.session_state["program_specs_docs"]:
+                icon = _type_icons.get(d["file_type"], "❓")
+                if d["error"]:
+                    st.caption(f"  {icon} ❌ **{d['filename']}** — {d['error']}")
+                elif d["char_count"] == 0:
+                    st.caption(f"  {icon} ⚠️ **{d['filename']}** — no text extracted")
+                else:
+                    st.caption(f"  {icon} ✅ **{d['filename']}** ({d['char_count']:,} chars)")
 
     st.divider()
 
@@ -675,10 +762,14 @@ with tab_context:
             st.session_state["doc_summaries"],
         )
         rep_ctx = build_reputation_context(st.session_state["reputation_summary"])
+        specs_ctx_prev = build_program_specs_context(st.session_state.get("program_specs_docs", []))
+        dr_ctx_prev = build_deep_research_context(st.session_state.get("deep_research_results", {}))
         st.text_area("Skills context", skills_ctx, height=120)
         st.text_area("Accreditation context", acc_ctx, height=120)
         st.text_area("Institutional context (consolidated)", inst_ctx, height=120)
         st.text_area("Reputation context", rep_ctx, height=120)
+        st.text_area("Program specifications context", specs_ctx_prev, height=120)
+        st.text_area("Deep research context", dr_ctx_prev, height=120)
 
 
 # ============================================================
@@ -719,6 +810,8 @@ with tab_generate:
         st.session_state["doc_summaries"],
     )
     rep_ctx = build_reputation_context(st.session_state["reputation_summary"])
+    specs_ctx = build_program_specs_context(st.session_state.get("program_specs_docs", []))
+    deep_research_ctx = build_deep_research_context(st.session_state.get("deep_research_results", {}))
 
     scope_labels = list({
         s for a in agencies for s in (
@@ -764,6 +857,8 @@ with tab_generate:
                 skills_ctx, acc_ctx, inst_ctx, language, ollama_url, model_gen,
                 course_hours=course_hours,
                 reputation_context=rep_ctx,
+                program_specs_context=specs_ctx,
+                deep_research_context=deep_research_ctx,
             ):
                 full_text += chunk
                 container.markdown(full_text)
@@ -796,6 +891,8 @@ with tab_generate:
                     st.session_state["learning_outcomes"],
                     skills_ctx, acc_ctx, language, ollama_url, model_gen,
                     course_hours=course_hours,
+                    program_specs_context=specs_ctx,
+                    deep_research_context=deep_research_ctx,
                 ):
                     full_text2 += chunk
                     container2.markdown(full_text2)
@@ -1049,3 +1146,176 @@ with tab_export:
         example_path = base_outputs / safe_inst / year_month / safe_prg
         st.code(str(example_path))
         st.caption("Syllabi are saved in a `syllabi/` subfolder within the program directory.")
+
+
+# ============================================================
+# TAB 5 — DEEP RESEARCH
+# ============================================================
+with tab_research:
+    st.header("Deep Research")
+    st.caption(
+        "Multi-module NotebookLM research on your institution — legal framework, "
+        "competitive landscape, student market, institutional history, and strategic dynamics. "
+        "Results are injected into curriculum generation automatically."
+    )
+
+    _dr_institution = st.session_state.get("_institution", "")
+    _dr_program = st.session_state.get("_program", "")
+
+    if not _dr_institution or not _dr_program:
+        st.warning("Set institution name and program name in **Sources & Setup** first.")
+        st.stop()
+
+    st.info(f"Researching: **{_dr_institution}** / {_dr_program}")
+
+    st.divider()
+
+    # ---- Module selection ----
+    st.subheader("Research Modules")
+    col_mod_l, col_mod_r = st.columns(2)
+    for i, mod in enumerate(MODULE_REGISTRY):
+        col = col_mod_l if i < 3 else col_mod_r
+        with col:
+            st.checkbox(
+                f"{mod['icon']}  {mod['title']}",
+                value=True,
+                key=f"deep_research_mod_{mod['key']}",
+                help=mod["description"],
+            )
+
+    _selected_keys = [
+        m["key"] for m in MODULE_REGISTRY
+        if st.session_state.get(f"deep_research_mod_{m['key']}", True)
+    ]
+    st.caption(f"{len(_selected_keys)} module(s) selected")
+    if not _selected_keys:
+        st.warning("Select at least one module.")
+
+    st.divider()
+
+    # ---- Configuration ----
+    st.subheader("Configuration")
+    _dr_col1, _dr_col2, _dr_col3 = st.columns([3, 1, 1])
+    with _dr_col1:
+        _dr_extra_urls_raw = st.text_area(
+            "Extra seed URLs (one per line, optional)",
+            height=90,
+            key="deep_research_extra_urls",
+            placeholder="https://www.theobserver.ca/tag/my-institution\nhttps://en.wikipedia.org/wiki/...",
+            help="These URLs are added as sources to every module notebook.",
+        )
+    with _dr_col2:
+        _dr_src_timeout = st.number_input(
+            "Source wait (s)", min_value=30, max_value=300, value=120,
+            key="deep_research_src_timeout",
+        )
+    with _dr_col3:
+        _dr_qry_timeout = st.number_input(
+            "Query timeout (s)", min_value=30, max_value=300, value=120,
+            key="deep_research_qry_timeout",
+        )
+
+    _dr_cleanup = st.checkbox(
+        "Delete NotebookLM notebooks after research", value=True,
+        key="deep_research_cleanup",
+    )
+
+    st.divider()
+
+    # ---- Run button ----
+    _run_label = f"Run Deep Research ({len(_selected_keys)} module(s))"
+    _run_disabled = not _selected_keys
+    if st.button(_run_label, type="primary", disabled=_run_disabled, key="btn_deep_research"):
+        _extra_urls = [u.strip() for u in _dr_extra_urls_raw.splitlines() if u.strip()]
+        _ok_count = 0
+        _total = len(_selected_keys)
+
+        for _mod_key in _selected_keys:
+            _mod = next(m for m in MODULE_REGISTRY if m["key"] == _mod_key)
+            with st.status(f"{_mod['icon']}  {_mod['title']}…", expanded=True) as _status:
+                def _make_cb(status_ctx):
+                    def _cb(msg):
+                        status_ctx.write(msg)
+                    return _cb
+
+                _result = run_research_module(
+                    module_key=_mod_key,
+                    institution_name=_dr_institution,
+                    program_name=_dr_program,
+                    extra_urls=_extra_urls or None,
+                    source_wait_timeout=int(_dr_src_timeout),
+                    query_timeout=int(_dr_qry_timeout),
+                    cleanup=_dr_cleanup,
+                    progress_callback=_make_cb(_status),
+                )
+                st.session_state["deep_research_results"][_mod_key] = _result
+
+                if _result["status"] == "ok":
+                    _ok_count += 1
+                    _status.update(label=f"✅ {_mod['title']}", state="complete")
+                else:
+                    _status.update(label=f"❌ {_mod['title']}", state="error")
+                    st.error(f"Error: {_result['error']}")
+                    if _result.get("notebook_id"):
+                        st.caption(f"Orphaned notebook ID (may need manual cleanup): {_result['notebook_id']}")
+
+        if _ok_count == _total:
+            st.success(f"All {_total} module(s) completed successfully.")
+        else:
+            st.warning(f"{_ok_count}/{_total} module(s) succeeded. Failed modules can be re-run individually.")
+
+    st.divider()
+
+    # ---- Results ----
+    _dr_results = st.session_state.get("deep_research_results", {})
+    if _dr_results:
+        st.subheader("Research Results")
+
+        # Status metrics row
+        _metric_cols = st.columns(len(MODULE_REGISTRY))
+        for _ci, _mod in enumerate(MODULE_REGISTRY):
+            _r = _dr_results.get(_mod["key"])
+            if _r is None:
+                _val, _delta = "Pending", None
+            elif _r["status"] == "ok":
+                _val, _delta = "Done", None
+            else:
+                _val, _delta = "Error", None
+            _metric_cols[_ci].metric(f"{_mod['icon']} {_mod['title']}", _val)
+
+        st.divider()
+
+        # Per-module expandable results
+        for _mod in MODULE_REGISTRY:
+            _r = _dr_results.get(_mod["key"])
+            if _r is None:
+                continue
+            _exp_icon = "✅" if _r["status"] == "ok" else "❌"
+            with st.expander(
+                f"{_exp_icon} {_mod['icon']} {_mod['title']}",
+                expanded=(_r["status"] == "error"),
+            ):
+                if _r["status"] == "ok":
+                    _wc = len(_r["answer"].split())
+                    st.caption(f"{_wc:,} words · {_r['sources_added']} extra URL source(s) ingested")
+                    st.markdown(_r["answer"])
+                else:
+                    st.error(f"Module failed: {_r['error']}")
+                    if _r.get("notebook_id"):
+                        st.caption(f"Notebook ID (may need manual cleanup in NotebookLM): {_r['notebook_id']}")
+
+        st.divider()
+
+        # Clear + context preview
+        _col_clr, _ = st.columns([1, 4])
+        with _col_clr:
+            if st.button("Clear all research results", key="btn_clear_research"):
+                st.session_state["deep_research_results"] = {}
+                st.rerun()
+
+        with st.expander("Context preview (what gets sent to curriculum generation)", expanded=False):
+            _ctx_preview = build_deep_research_context(_dr_results)
+            st.text_area("Deep research context", _ctx_preview, height=250, disabled=True)
+
+    else:
+        st.info("No research results yet. Select modules and click **Run Deep Research**.")

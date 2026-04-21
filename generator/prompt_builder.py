@@ -66,6 +66,34 @@ def build_institutional_context(consolidated_summary: str, doc_summaries: list[d
     return "\n".join(parts)
 
 
+def build_program_specs_context(specs_docs: list[dict], max_chars: int = 12000) -> str:
+    """
+    Combines extracted text from all program specification files into a single
+    context block for the LLM.  Truncates to max_chars to stay within context limits.
+    """
+    if not specs_docs:
+        return "No program specification documents provided."
+
+    useful = [d for d in specs_docs if not d.get("error") and d.get("char_count", 0) > 0]
+    if not useful:
+        return "No program specification documents provided."
+
+    parts = [f"Program specification materials ({len(useful)} file(s)):"]
+    total = 0
+    for d in useful:
+        header = f"\n--- {d['filename']} ({d['file_type']}) ---\n"
+        text = d["text"]
+        remaining = max_chars - total - len(header)
+        if remaining <= 0:
+            parts.append("\n[... additional files truncated to fit context limit ...]")
+            break
+        if len(text) > remaining:
+            text = text[:remaining] + "\n[... truncated ...]"
+        parts.append(header + text)
+        total += len(header) + len(text)
+    return "\n".join(parts)
+
+
 def build_reputation_context(reputation_summary: str) -> str:
     if not reputation_summary or not reputation_summary.strip():
         return "No public reputation data available."
