@@ -197,3 +197,32 @@ outputs/
 - Focus on `loaders/deep_research_loader.py` query tuning once real institution data flows through NLM
 - Consider adding disk cache for deep research results (`utils/deep_research_cache.py`, same pattern as `utils/institutional_cache.py`)
 - Consider per-module re-run button in Tab 5 results section
+
+---
+
+## Session Log — 2026-04-22
+
+### Changes Made
+- **`exporter/curriculum_exporter.py`** — new module with `build_curriculum_export()` and `save_curriculum_export()`; assembles a structured `curriculum_export.json` from all session state data (metadata, inputs, curriculum content) using schema version 1.0
+- **JSON export wired into Tab 4 (Export)** — `app.py` now imports `curriculum_exporter`; two new controls added: an in-browser `Download curriculum_export.json` button and a `Save JSON to Output Folder` button that writes alongside the PDFs; `import json` added to `app.py` top-level imports
+- **`curriculum_export_sample.json`** — complete, realistic sample file for a "Bachelor of Applied Software Engineering" at Lambton College; includes 40 ranked skills, CEAB accreditation data, institutional summary, reputation text, two deep research modules, full learning outcomes + 34-course list + competency map + two full syllabi (CS102, CS208)
+- **`/bais` skill updated** — added Step 2 (Update README.md) with detailed instructions for creating or updating a project-facing README; step numbering updated throughout; checklist and session closure box updated to include README.md
+
+### Decisions & Rationale
+- JSON export uses `schema_version: "1.0"` field so downstream apps can handle format evolution gracefully
+- `build_curriculum_export()` is a pure function (takes explicit args, no session state dependency) — makes it independently testable and usable outside Streamlit
+- Download button (`st.download_button`) assembles JSON in-memory without disk I/O; the separate "Save to Folder" button writes to the same output folder hierarchy as the PDFs — two modes to suit different workflows
+- Sample file uses Lambton College as the fictional institution (consistent with project test data conventions from prior sessions)
+- `courses_detected` array in the export is parsed from the course list markdown using the existing regex pattern already present in `app.py` Tab 3 — no duplication of logic
+
+### Known Issues / TODOs
+- JSON export is not yet auto-triggered when a full curriculum is built — it requires a manual button click in Tab 4; could be auto-saved at the end of each generation step
+- `curriculum_exporter.py` has no dedicated unit tests yet (the module is pure Python with no Streamlit dependency, so tests would be straightforward to add)
+- Deep research results are still not cached to disk — `utils/deep_research_cache.py` remains a TODO from prior session
+- No per-module re-run button in Tab 5 (carried forward from previous session)
+
+### Next Session Starting Point
+- Add unit tests for `exporter/curriculum_exporter.py` (pure function, easy to test with mock DataFrames)
+- Consider auto-saving `curriculum_export.json` at end of each generation step (not just on manual Export tab click)
+- Test the full export round-trip: generate curriculum → download JSON → load in the downstream app being built
+- Review `utils/deep_research_cache.py` implementation to cache deep research results between sessions

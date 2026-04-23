@@ -8,6 +8,7 @@ Run with:  streamlit run app.py
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import os
@@ -58,6 +59,7 @@ from exporter.pdf_exporter import (
     _USE_UNICODE,
     _UNICODE_FONT_PATH,
 )
+from exporter.curriculum_exporter import build_curriculum_export, save_curriculum_export
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -1122,19 +1124,66 @@ with tab_export:
         st.divider()
 
         # ---- Plain text download ----
-        st.subheader("Download as Plain Text")
+        st.subheader("Download as Plain Text / JSON")
         full_md = "\n\n---\n\n".join(filter(None, [outcomes, courses, cmap]))
         if syllabi:
             full_md += "\n\n---\n\n# Course Syllabi\n\n"
             full_md += "\n\n---\n\n".join(syllabi.values())
 
         safe_prog = program_name.replace(" ", "_")[:40]
-        st.download_button(
-            label="Download full curriculum as Markdown",
-            data=full_md.encode("utf-8"),
-            file_name=f"curriculum_{safe_prog}.md",
-            mime="text/markdown",
+
+        dl_col_md, dl_col_json = st.columns(2)
+        with dl_col_md:
+            st.download_button(
+                label="Download full curriculum as Markdown",
+                data=full_md.encode("utf-8"),
+                file_name=f"curriculum_{safe_prog}.md",
+                mime="text/markdown",
+            )
+        with dl_col_json:
+            _top_n_export = st.session_state.get("top_n_gen", st.session_state.get("top_n_ctx", 40))
+            _export_data = build_curriculum_export(
+                institution_name=institution_name,
+                program_name=program_name,
+                program_level=program_level,
+                language=language,
+                course_hours=st.session_state.get("_course_hours"),
+                skills_df=st.session_state["skills_df"],
+                top_n=_top_n_export,
+                agencies=st.session_state["agencies"],
+                institutional_docs=st.session_state["institutional_docs"],
+                consolidated_summary=st.session_state["consolidated_summary"],
+                reputation_snippets=st.session_state["reputation_snippets"],
+                reputation_summary=st.session_state["reputation_summary"],
+                program_specs_docs=st.session_state.get("program_specs_docs", []),
+                deep_research_results=st.session_state.get("deep_research_results", {}),
+                learning_outcomes=outcomes,
+                course_list=courses,
+                competency_map=cmap,
+                syllabi=syllabi,
+            )
+            st.download_button(
+                label="Download curriculum_export.json",
+                data=json.dumps(_export_data, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"curriculum_export_{safe_prog}.json",
+                mime="application/json",
+            )
+
+        st.divider()
+
+        st.subheader("Save JSON to Output Folder")
+        st.caption(
+            "Saves `curriculum_export.json` alongside the PDFs in the output folder. "
+            "This is the machine-readable file for downstream applications."
         )
+        if st.button("Save curriculum_export.json", key="save_json"):
+            try:
+                _json_path = save_curriculum_export(
+                    _export_data, institution_name, program_name, base_outputs
+                )
+                st.success(f"Saved to:\n`{_json_path}`")
+            except Exception as exc:
+                st.error(f"JSON save failed: {exc}")
 
         # ---- Output folder info ----
         st.divider()
