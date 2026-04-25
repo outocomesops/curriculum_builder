@@ -20,8 +20,8 @@ The result is a structured, exportable curriculum package: a full PDF for instit
 - **Accreditation standards integration** — reads structured `quality_definition.json` files from a multi-agency quality assurance library; filters by program scope and jurisdiction
 - **Institutional document summarisation** — extracts and consolidates content from PDF, DOCX, and TXT policy files using an Ollama LLM; caches the consolidated profile per institution
 - **Program specifications loader** — ingests any stakeholder materials folder: Excel, Word, PDF, PowerPoint, images (via Ollama vision), video/audio (via Whisper), CSV, TXT
-- **Institutional reputation research** — profiles the institution via NotebookLM (web-sourced) or DuckDuckGo + Ollama analysis; injects findings into generation prompts
-- **Deep research engine** — runs up to 5 NotebookLM research modules in parallel: Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis
+- **Institutional reputation research** — profiles the institution via NotebookLM native web research (`nlm research start --auto-import`) or DuckDuckGo + Ollama; injects findings into generation prompts
+- **Deep research engine** — runs up to 5 NotebookLM research modules: Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis; NLM discovers and ingests its own real web sources (deep mode: ~40 sources; fast: ~10)
 - **Four-step curriculum generation** — sequential LLM pipeline: learning outcomes → course list → competency map → individual syllabi; each step streams live to the UI
 - **PDF export** — saves full curriculum or individual sections as formatted PDFs in a dated folder hierarchy (`outputs/{Institution}/{YYYY-MM}/{Program}/`)
 - **JSON export** — produces a structured `curriculum_export.json` with all inputs and generated content; downloadable from the browser or saved to the output folder
@@ -31,7 +31,7 @@ The result is a structured, exportable curriculum package: a full PDF for instit
 
 ## Architecture Overview
 
-The app follows a linear data pipeline across five Streamlit tabs. Loaders ingest heterogeneous source data, the generator builds LLM context and streams curriculum text, and exporters write the output to PDF and JSON.
+The app follows a linear data pipeline across four Streamlit tabs. Loaders ingest heterogeneous source data, the generator builds LLM context and streams curriculum text, and exporters write the output to PDF and JSON.
 
 ```
 jobs.db / CSV ──► job_loader ──────────────────────────────► skills_df
@@ -75,7 +75,7 @@ pip install -r requirements.txt
 ### Run
 
 ```bash
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
 The app opens at `http://localhost:8501` (or the next available port).
@@ -84,13 +84,13 @@ The app opens at `http://localhost:8501` (or the next available port).
 
 ## Usage
 
-The app is divided into five tabs, intended to be used in order:
+The app is divided into four tabs, intended to be used in order:
 
 **Tab 1 — Sources & Setup**
-Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs. Optionally run a reputation research query.
+Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs. Optionally run a reputation research query via NotebookLM or DuckDuckGo + Ollama.
 
-**Tab 2 — Context Preview**
-Review the loaded skills table and agency requirements. Summarise individual institutional documents, then consolidate them into a single institutional profile (≤1000 words). The full LLM context string is visible for inspection.
+**Tab 2 — Context & Research**
+The central intelligence tab. Review loaded skills and agency requirements, summarise and consolidate institutional documents, and run the five NotebookLM deep research modules (Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis). Deep research results are automatically injected into curriculum generation prompts. The full assembled LLM context is visible for inspection.
 
 **Tab 3 — Generate**
 Run the four-step pipeline sequentially. Each step streams output live. Steps: (1) Learning Outcomes, (2) Course List, (3) Competency Map, (4) Individual Syllabi.
@@ -98,16 +98,13 @@ Run the four-step pipeline sequentially. Each step streams output live. Steps: (
 **Tab 4 — Export**
 Save the full curriculum or individual sections as PDFs. Download the curriculum as Markdown or as `curriculum_export.json`. Save the JSON to the output folder alongside the PDFs.
 
-**Tab 5 — Deep Research**
-Select research modules and run NotebookLM-backed intelligence gathering on the institution. Results are automatically injected into the learning outcomes and course list prompts.
-
 ---
 
 ## Project Structure
 
 ```
 curriculum_builder/
-├── app.py                        Streamlit entrypoint — 5 tabs
+├── app.py                        Streamlit entrypoint — 4 tabs
 ├── config.py                     Constants: Ollama URL, output paths, languages, program levels
 ├── requirements.txt              Python dependencies
 ├── curriculum_export_sample.json Sample JSON export (Lambton College / Software Engineering)
@@ -213,7 +210,8 @@ See `curriculum_export_sample.json` for a complete worked example.
 - **Non-Latin-1 scripts** (Arabic, Chinese, etc.) require adding a TTF font via `pdf.add_font()` in `pdf_exporter.py`; Latin-1 is the current default with Unicode approximation
 - **Ollama must be running** for all generation and summarisation steps; no offline fallback
 - **`nlm login` required** for NotebookLM features; session-based auth expires and must be re-run manually
-- **Deep research results are not cached** to disk — closing the browser tab loses them; a `utils/deep_research_cache.py` is planned
+- **Deep research results are not cached** to disk — closing the browser tab loses them; `utils/deep_research_cache.py` is a planned addition
+- **NLM deep research takes ~5 minutes per module** (deep mode); use fast mode (~30 s) for quick iteration at the cost of fewer sources
 - **JSON export requires manual trigger** in Tab 4; it is not auto-saved at the end of each generation step
 - **Video/audio transcription** requires `pip install openai-whisper` and `ffmpeg` on PATH (not in `requirements.txt`)
 - **Competency map** is plain markdown text; a dedicated table renderer would improve readability in the UI

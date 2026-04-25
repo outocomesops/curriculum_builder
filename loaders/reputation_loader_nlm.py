@@ -3,10 +3,13 @@ Reputation loader using NotebookLM via the nlm CLI.
 
 Pipeline:
   1. Create a notebook titled "Reputation: <institution>"
-  2. Add any caller-supplied URLs as sources (best-effort, failures are skipped)
-  3. Query the notebook — if no sources were loaded NotebookLM uses its own knowledge
-  4. Optionally delete the notebook when done
-  5. Return (notebook_id, summary_text)
+  2. Add a text seed source (baseline context)
+  3. Run NLM's native web research (`nlm research start --auto-import`) so NLM
+     discovers and ingests real sources about the institution's reputation
+  4. Optionally add any caller-supplied extra URLs
+  5. Query the notebook
+  6. Optionally delete the notebook
+  7. Return (notebook_id, summary_text)
 """
 from __future__ import annotations
 
@@ -22,6 +25,12 @@ _REPUTATION_QUERY = (
     "relationships, notable achievements, and any significant recent events. "
     "Be specific and cite notable details from the sources."
 )
+
+_REPUTATION_RESEARCH_QUERY = (
+    "{name} reputation reviews student experience graduate outcomes public perception"
+)
+
+_DEFAULT_RESEARCH_TIMEOUT: int = 420   # 7 min covers NLM deep mode (~5 min) + import
 
 
 def _run_nlm(args: list[str], timeout: int = 180) -> tuple[str, str, int]:
@@ -49,7 +58,7 @@ def _create_notebook(institution_name: str) -> str:
 
 
 def _add_text_seed(notebook_id: str, institution_name: str, city: str = "") -> None:
-    """Add a minimal text source so the notebook always has at least one source to query."""
+    """Add a minimal text source so the notebook always has at least one source."""
     location = f" in {city}" if city else ""
     seed = (
         f"{institution_name} is a higher education institution{location}. "
@@ -62,21 +71,37 @@ def _add_text_seed(notebook_id: str, institution_name: str, city: str = "") -> N
     )
 
 
+def _run_nlm_research(
+    notebook_id: str,
+    query: str,
+    mode: str = "deep",
+    timeout: int = _DEFAULT_RESEARCH_TIMEOUT,
+) -> tuple[str, str, int]:
+    """
+    Triggers NLM's native web research and waits until discovered sources are
+    imported into the notebook. --auto-import handles status polling + import.
+    """
+    return _run_nlm(
+        ["research", "start", query,
+         "--notebook-id", notebook_id,
+         "--mode", mode,
+         "--auto-import"],
+        timeout=timeout,
+    )
+
+
 def _add_sources_best_effort(
     notebook_id: str,
     urls: list[str],
-    wait_timeout: int = 120,
+    timeout: int = 90,
 ) -> list[str]:
-    """
-    Try to add each URL individually. Returns list of URLs that succeeded.
-    Failures are silently skipped so the pipeline always continues.
-    """
+    """Add caller-supplied extra URLs on top of NLM-researched sources."""
     added: list[str] = []
     for url in urls:
         _, _, rc = _run_nlm(
             ["source", "add", notebook_id, "--url", url,
-             "--wait", "--wait-timeout", str(wait_timeout)],
-            timeout=wait_timeout + 30,
+             "--wait", "--wait-timeout", "60"],
+            timeout=timeout,
         )
         if rc == 0:
             added.append(url)
@@ -109,14 +134,16 @@ def fetch_reputation_via_notebooklm(
     city: str = "",
     extra_urls: list[str] | None = None,
     cleanup: bool = True,
-    source_wait_timeout: int = 120,
+    research_timeout: int = _DEFAULT_RESEARCH_TIMEOUT,
+    research_mode: str = "deep",
     query_timeout: int = 120,
 ) -> tuple[str, str]:
     """
     Research public reputation of an institution using NotebookLM.
 
-    If extra_urls are provided they are added as sources (best-effort).
-    If none are provided — or all fail — NotebookLM queries from its own knowledge.
+    Uses NLM's native web research to find real sources about the institution's
+    reputation — NLM discovers its own references rather than relying on an
+    external search library.
 
     Returns (notebook_id, reputation_summary_text).
     """
@@ -124,12 +151,16 @@ def fetch_reputation_via_notebooklm(
 
     notebook_id = _create_notebook(institution_name)
     try:
-        # Always add a text seed so the notebook has at least one queryable source
+        # Always add a text seed so the notebook has guaranteed baseline context
         _add_text_seed(notebook_id, institution_name, city)
 
-        # Add any caller-supplied URLs on top (best-effort)
+        # NLM native web research — discovers and imports real reputation sources
+        research_query = _REPUTATION_RESEARCH_QUERY.format(name=search_name)
+        _run_nlm_research(notebook_id, research_query, mode=research_mode, timeout=research_timeout)
+
+        # Add any caller-supplied extra URLs on top (best-effort)
         if extra_urls:
-            _add_sources_best_effort(notebook_id, extra_urls, wait_timeout=source_wait_timeout)
+            _add_sources_best_effort(notebook_id, extra_urls)
 
         question = _REPUTATION_QUERY.format(name=search_name)
         answer = _query_notebook(notebook_id, question, timeout=query_timeout)
@@ -137,4 +168,3 @@ def fetch_reputation_via_notebooklm(
     finally:
         if cleanup:
             delete_notebook(notebook_id)
-

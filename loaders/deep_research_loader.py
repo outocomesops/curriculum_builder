@@ -2,9 +2,18 @@
 Deep Research Loader
 ====================
 Runs multi-module NotebookLM research on a higher-education institution.
-Each module creates its own NLM notebook, seeds it, queries it, and cleans up.
-Module-level isolation means one failure never blocks the others.
 
+Each module:
+  1. Creates its own NLM notebook
+  2. Adds a text seed source
+  3. Uses NLM's native deep-research (`nlm research start --auto-import`) so
+     NLM itself discovers and ingests ~40 real web sources — no external search
+     library needed
+  4. Optionally adds any caller-supplied extra URLs
+  5. Queries the notebook
+  6. Cleans up
+
+Module-level isolation means one failure never blocks the others.
 Add new modules by appending dicts to MODULE_REGISTRY — no other code changes needed.
 """
 from __future__ import annotations
@@ -13,6 +22,9 @@ import json
 import re
 import subprocess
 from typing import Callable
+
+DEFAULT_RESEARCH_TIMEOUT: int = 420   # 7 min covers NLM deep mode (~5 min) + import
+DEFAULT_QUERY_TIMEOUT: int = 120
 
 # ---------------------------------------------------------------------------
 # Research module registry
@@ -27,6 +39,9 @@ MODULE_REGISTRY: list[dict] = [
             "Applicable laws, government policies, accreditation regulations, "
             "and quality assurance frameworks governing the institution and its country's "
             "higher-education sector."
+        ),
+        "research_query_template": (
+            "{institution_name} higher education accreditation regulations legal requirements {program_name}"
         ),
         "seed_text_template": (
             "{institution_name} is a higher education institution offering {program_name}. "
@@ -51,6 +66,9 @@ MODULE_REGISTRY: list[dict] = [
             "Main competitors, program comparison, market positioning, "
             "tuition benchmarks, and enrollment data."
         ),
+        "research_query_template": (
+            "{institution_name} {program_name} competitors peer institutions ranking tuition comparison"
+        ),
         "seed_text_template": (
             "{institution_name} offers {program_name}. "
             "This research examines the competitive higher education landscape, identifying peer "
@@ -72,6 +90,9 @@ MODULE_REGISTRY: list[dict] = [
         "description": (
             "Target student demographics, enrollment trends, graduate employment outcomes, "
             "and how the institution is perceived by employers and prospective students."
+        ),
+        "research_query_template": (
+            "{institution_name} graduate employment outcomes salary employer perception student reviews {program_name}"
         ),
         "seed_text_template": (
             "{institution_name} offers {program_name}. "
@@ -96,6 +117,9 @@ MODULE_REGISTRY: list[dict] = [
             "Founding story, key milestones, mission evolution, pedagogical traditions, "
             "and the cultural identity that shapes how the institution operates."
         ),
+        "research_query_template": (
+            "{institution_name} history founding milestones mission values identity"
+        ),
         "seed_text_template": (
             "{institution_name} is a higher education institution. "
             "This research covers its founding history, key institutional milestones, evolution "
@@ -119,6 +143,9 @@ MODULE_REGISTRY: list[dict] = [
             "Institution as a rational actor: incentive structures, competitive dynamics, "
             "responses to policy and market pressures, and strategic decision-making patterns."
         ),
+        "research_query_template": (
+            "{institution_name} strategic plan priorities enrollment trends market position new programs"
+        ),
         "seed_text_template": (
             "{institution_name} operates in a competitive and regulated higher education market. "
             "This research analyses the institution's strategic decision-making patterns, how it "
@@ -138,8 +165,6 @@ MODULE_REGISTRY: list[dict] = [
     },
 ]
 
-DEFAULT_SOURCE_WAIT_TIMEOUT: int = 120
-DEFAULT_QUERY_TIMEOUT: int = 120
 
 # ---------------------------------------------------------------------------
 # Internal NLM CLI helpers
@@ -174,17 +199,40 @@ def _add_text_source(notebook_id: str, text: str, title: str, timeout: int = 60)
         raise RuntimeError(f"nlm source add (text) failed (rc={rc}): {stderr.strip()}")
 
 
+def _run_nlm_research(
+    notebook_id: str,
+    query: str,
+    mode: str = "deep",
+    timeout: int = DEFAULT_RESEARCH_TIMEOUT,
+) -> tuple[str, str, int]:
+    """
+    Triggers NLM's native web research for the given query and waits until
+    all discovered sources are imported into the notebook.
+
+    --auto-import blocks the subprocess until research completes and sources
+    are ingested — no separate status/import step needed.
+    """
+    return _run_nlm(
+        ["research", "start", query,
+         "--notebook-id", notebook_id,
+         "--mode", mode,
+         "--auto-import"],
+        timeout=timeout,
+    )
+
+
 def _add_url_sources_best_effort(
     notebook_id: str,
     urls: list[str],
-    wait_timeout: int = 120,
+    timeout: int = 90,
 ) -> list[str]:
+    """Add caller-supplied extra URLs on top of NLM-researched sources."""
     succeeded = []
     for url in urls:
         try:
             _, _, rc = _run_nlm(
-                ["source", "add", notebook_id, "--url", url, "--wait", "--wait-timeout", str(wait_timeout)],
-                timeout=wait_timeout + 30,
+                ["source", "add", notebook_id, "--url", url, "--wait", "--wait-timeout", "60"],
+                timeout=timeout,
             )
             if rc == 0:
                 succeeded.append(url)
@@ -226,13 +274,18 @@ def run_research_module(
     institution_name: str,
     program_name: str,
     extra_urls: list[str] | None = None,
-    source_wait_timeout: int = DEFAULT_SOURCE_WAIT_TIMEOUT,
+    research_timeout: int = DEFAULT_RESEARCH_TIMEOUT,
     query_timeout: int = DEFAULT_QUERY_TIMEOUT,
     cleanup: bool = True,
     progress_callback: Callable[[str], None] | None = None,
+    research_mode: str = "deep",
 ) -> dict:
     """
     Runs one research module end-to-end against NotebookLM.
+
+    Uses NLM's native web research (`nlm research start --mode <mode> --auto-import`)
+    to discover and ingest real sources — NLM finds its own references rather
+    than relying on an external search library.
 
     Returns a dict with keys:
       module_key, status ("ok"|"error"), answer, error, notebook_id, sources_added
@@ -254,6 +307,9 @@ def run_research_module(
     seed_text = module["seed_text_template"].format(
         institution_name=institution_name, program_name=program_name
     )
+    research_query = module["research_query_template"].format(
+        institution_name=institution_name, program_name=program_name
+    )
     query = module["query_template"].format(
         institution_name=institution_name, program_name=program_name
     )
@@ -262,22 +318,41 @@ def run_research_module(
     sources_added = 0
 
     try:
+        # Step 1: create notebook
         _cb("Creating NotebookLM notebook…")
         notebook_id = _create_notebook(
             f"DeepResearch: {module['title']} — {institution_name}"
         )
 
-        _cb("Adding seed source…")
+        # Step 2: add text seed so notebook always has baseline context
+        _cb("Adding text seed source…")
         _add_text_source(notebook_id, seed_text, title="Research seed", timeout=60)
 
+        # Step 3: NLM native web research — NLM discovers and imports its own sources
+        mode_label = "deep (~5 min, ~40 sources)" if research_mode == "deep" else "fast (~30 s, ~10 sources)"
+        _cb(f'Running NLM {mode_label} research: "{research_query}"...')
+        stdout, stderr, rc = _run_nlm_research(
+            notebook_id, research_query, mode=research_mode, timeout=research_timeout
+        )
+        if rc != 0:
+            _cb(f"NLM research warning (rc={rc}): {stderr.strip()[:200] or stdout.strip()[:200]}")
+        else:
+            # Try to count imported sources from output
+            count_match = re.search(r"(\d+)\s+source", stdout, re.IGNORECASE)
+            if count_match:
+                sources_added = int(count_match.group(1))
+                _cb(f"NLM research complete — {sources_added} source(s) imported.")
+            else:
+                _cb("NLM research complete.")
+
+        # Step 4: add caller-supplied extra URLs (bonus, best-effort)
         if extra_urls:
             _cb(f"Adding {len(extra_urls)} extra URL(s)…")
-            succeeded = _add_url_sources_best_effort(
-                notebook_id, extra_urls, wait_timeout=source_wait_timeout
-            )
-            sources_added = len(succeeded)
-            _cb(f"{sources_added}/{len(extra_urls)} URL(s) ingested.")
+            added = _add_url_sources_best_effort(notebook_id, extra_urls)
+            sources_added += len(added)
+            _cb(f"{len(added)}/{len(extra_urls)} extra URL(s) ingested.")
 
+        # Step 5: query
         _cb("Querying NotebookLM…")
         answer = _query_notebook(notebook_id, query, timeout=query_timeout)
 

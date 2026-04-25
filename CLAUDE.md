@@ -226,3 +226,33 @@ outputs/
 - Consider auto-saving `curriculum_export.json` at end of each generation step (not just on manual Export tab click)
 - Test the full export round-trip: generate curriculum → download JSON → load in the downstream app being built
 - Review `utils/deep_research_cache.py` implementation to cache deep research results between sessions
+
+---
+
+## Session Log — 2026-04-24
+
+### Changes Made
+- **Deep Research tab merged into Tab 2** — Tab 5 (Deep Research) removed entirely; its full UI (module checkboxes, config, run button, results, context preview) embedded inside Tab 2, now renamed "Context & Research"; `with tab_research:` orphaned block deleted from `app.py`; app now has 4 tabs
+- **NLM native web research replaces DuckDuckGo** — `loaders/deep_research_loader.py` and `loaders/reputation_loader_nlm.py` were returning zero URLs via DuckDuckGo; replaced broken DDG pre-search with `nlm research start --mode deep --auto-import` so NLM discovers and imports its own real web sources (~40 for deep, ~10 for fast) before the notebook is queried
+- **`deep_research_loader.py` rewritten** — removed `_DDG_MAX_PER_QUERY`, `_search_urls_for_module()`, `_add_url_sources_best_effort()`; added `_run_nlm_research()` helper; each MODULE_REGISTRY entry now has `research_query_template` (concise web-search query) instead of `search_query_templates`; `run_research_module()` parameters changed: `source_wait_timeout` → `research_timeout` (default 420 s), added `research_mode` (default "deep")
+- **`reputation_loader_nlm.py` rewritten** — removed `_search_reputation_urls()`; added `_run_nlm_research()`; `fetch_reputation_via_notebooklm()` now calls NLM research before querying; params updated to `research_timeout` and `research_mode`
+- **App.py UI updates** — "Source wait (s)" replaced with Research mode dropdown (deep/fast) + Research timeout field (default 420 s); `run_research_module()` calls updated to pass `research_timeout` and `research_mode`; reputation NLM call updated to drop `source_wait_timeout`
+
+### Decisions & Rationale
+- Replaced DuckDuckGo with NLM native research (`nlm research start --auto-import`) — root cause was that the DDG library was returning zero results; NLM's built-in research is more reliable, requires no external API, and discovers higher-quality academic/institutional sources
+- `--auto-import` flag used over the 3-step start→status→import cycle — it blocks the subprocess until research completes and sources are ingested, simpler and removes polling logic from Python
+- `research_mode` defaults to "deep" (~5 min, ~40 sources) over "fast" (~30s, ~10 sources) — deep mode provides materially better source coverage for academic research; fast mode offered in UI for quicker iteration
+- Kept extra_urls support as a best-effort bonus step after NLM research — allows manual supplementation without depending on it
+- `research_timeout` default set to 420 s (7 min) to safely cover NLM deep mode duration + source import overhead
+
+### Known Issues / TODOs
+- Deep research results are still not cached to disk — `utils/deep_research_cache.py` remains a TODO
+- No per-module re-run button; users must deselect and re-run the full set
+- `curriculum_exporter.py` still has no unit tests
+- JSON export not auto-triggered at end of generation pipeline
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+
+### Next Session Starting Point
+- Run the full end-to-end pipeline: Tab 1 → load data → Tab 2 → run one deep research module (fast mode for speed) → Tab 3 → generate learning outcomes; verify deep research context appears in the prompt
+- Add unit tests for `exporter/curriculum_exporter.py`
+- Implement `utils/deep_research_cache.py` to persist deep research results between browser sessions

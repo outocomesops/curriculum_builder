@@ -145,12 +145,11 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_sources, tab_context, tab_generate, tab_export, tab_research = st.tabs([
+tab_sources, tab_context, tab_generate, tab_export = st.tabs([
     "1  Sources & Setup",
-    "2  Context Preview",
+    "2  Context & Research",
     "3  Generate",
     "4  Export",
-    "5  Deep Research",
 ])
 
 
@@ -530,7 +529,8 @@ with tab_sources:
                             city=rep_city,
                             extra_urls=extra_urls or None,
                             cleanup=nlm_cleanup,
-                            source_wait_timeout=180,
+                            research_timeout=420,
+                            research_mode="deep",
                             query_timeout=120,
                         )
                         st.session_state["reputation_summary"] = rep_summary
@@ -754,7 +754,166 @@ with tab_context:
         else:
             st.info("No documents loaded yet.")
 
+    # ---- Deep Research ----
+    st.divider()
+    st.subheader("Deep Research")
+    st.caption(
+        "Multi-module NotebookLM research — legal framework, competitive landscape, "
+        "student market, institutional history, and strategic analysis. "
+        "Results are automatically injected into curriculum generation."
+    )
+
+    _dr_institution = st.session_state.get("_institution", "")
+    _dr_program = st.session_state.get("_program", "")
+
+    if not _dr_institution or not _dr_program:
+        st.info("Set institution name and program name in **Sources & Setup** to enable deep research.")
+    else:
+        st.info(f"Researching: **{_dr_institution}** / {_dr_program}")
+
+        # Module selection
+        col_mod_l, col_mod_r = st.columns(2)
+        for i, mod in enumerate(MODULE_REGISTRY):
+            col = col_mod_l if i < 3 else col_mod_r
+            with col:
+                st.checkbox(
+                    f"{mod['icon']}  {mod['title']}",
+                    value=True,
+                    key=f"deep_research_mod_{mod['key']}",
+                    help=mod["description"],
+                )
+
+        _selected_keys = [
+            m["key"] for m in MODULE_REGISTRY
+            if st.session_state.get(f"deep_research_mod_{m['key']}", True)
+        ]
+        st.caption(f"{len(_selected_keys)} module(s) selected")
+
+        # Configuration
+        _dr_col1, _dr_col2, _dr_col3, _dr_col4 = st.columns([2, 1, 1, 1])
+        with _dr_col1:
+            _dr_extra_urls_raw = st.text_area(
+                "Extra seed URLs (one per line, optional)",
+                height=75,
+                key="deep_research_extra_urls",
+                placeholder="https://en.wikipedia.org/wiki/...\nhttps://www.institution.edu/about",
+                help="Added as sources on top of the NLM-researched sources.",
+            )
+        with _dr_col2:
+            _dr_research_mode = st.selectbox(
+                "Research mode",
+                options=["deep", "fast"],
+                index=0,
+                key="deep_research_mode",
+                help="deep: ~5 min, ~40 sources  |  fast: ~30 s, ~10 sources",
+            )
+        with _dr_col3:
+            _dr_research_timeout = st.number_input(
+                "Research timeout (s)", min_value=60, max_value=900,
+                value=420,
+                key="deep_research_research_timeout",
+                help="Total time allowed for NLM web research + source import per module.",
+            )
+        with _dr_col4:
+            _dr_qry_timeout = st.number_input(
+                "Query timeout (s)", min_value=30, max_value=300, value=120,
+                key="deep_research_qry_timeout",
+            )
+
+        _dr_cleanup = st.checkbox(
+            "Delete NotebookLM notebooks after research", value=True,
+            key="deep_research_cleanup",
+        )
+
+        # Run button
+        _run_label = f"Run Deep Research ({len(_selected_keys)} module(s))"
+        if st.button(_run_label, type="primary", disabled=not _selected_keys, key="btn_deep_research"):
+            _extra_urls = [u.strip() for u in _dr_extra_urls_raw.splitlines() if u.strip()]
+            _ok_count = 0
+            _total = len(_selected_keys)
+
+            for _mod_key in _selected_keys:
+                _mod = next(m for m in MODULE_REGISTRY if m["key"] == _mod_key)
+                with st.status(f"{_mod['icon']}  {_mod['title']}…", expanded=True) as _status:
+                    def _make_cb(status_ctx):
+                        def _cb(msg):
+                            status_ctx.write(msg)
+                        return _cb
+
+                    _result = run_research_module(
+                        module_key=_mod_key,
+                        institution_name=_dr_institution,
+                        program_name=_dr_program,
+                        extra_urls=_extra_urls or None,
+                        research_timeout=int(_dr_research_timeout),
+                        query_timeout=int(_dr_qry_timeout),
+                        cleanup=_dr_cleanup,
+                        progress_callback=_make_cb(_status),
+                        research_mode=_dr_research_mode,
+                    )
+                    st.session_state["deep_research_results"][_mod_key] = _result
+
+                    if _result["status"] == "ok":
+                        _ok_count += 1
+                        _status.update(label=f"✅ {_mod['title']}", state="complete")
+                    else:
+                        _status.update(label=f"❌ {_mod['title']}", state="error")
+                        st.error(f"Error: {_result['error']}")
+                        if _result.get("notebook_id"):
+                            st.caption(f"Orphaned notebook ID: {_result['notebook_id']}")
+
+            if _ok_count == _total:
+                st.success(f"All {_total} module(s) completed successfully.")
+            else:
+                st.warning(f"{_ok_count}/{_total} module(s) succeeded.")
+
+        # Results
+        _dr_results = st.session_state.get("deep_research_results", {})
+        if _dr_results:
+            st.divider()
+            st.subheader("Research Results")
+
+            _metric_cols = st.columns(len(MODULE_REGISTRY))
+            for _ci, _mod in enumerate(MODULE_REGISTRY):
+                _r = _dr_results.get(_mod["key"])
+                if _r is None:
+                    _val = "Pending"
+                elif _r["status"] == "ok":
+                    _val = "Done"
+                else:
+                    _val = "Error"
+                _metric_cols[_ci].metric(f"{_mod['icon']} {_mod['title']}", _val)
+
+            st.divider()
+
+            for _mod in MODULE_REGISTRY:
+                _r = _dr_results.get(_mod["key"])
+                if _r is None:
+                    continue
+                _exp_icon = "✅" if _r["status"] == "ok" else "❌"
+                with st.expander(
+                    f"{_exp_icon} {_mod['icon']} {_mod['title']}",
+                    expanded=(_r["status"] == "error"),
+                ):
+                    if _r["status"] == "ok":
+                        _wc = len(_r["answer"].split())
+                        st.caption(f"{_wc:,} words · {_r['sources_added']} URL source(s) ingested")
+                        st.markdown(_r["answer"])
+                    else:
+                        st.error(f"Module failed: {_r['error']}")
+                        if _r.get("notebook_id"):
+                            st.caption(f"Notebook ID (may need manual cleanup in NotebookLM): {_r['notebook_id']}")
+
+            _col_clr, _ = st.columns([1, 4])
+            with _col_clr:
+                if st.button("Clear all research results", key="btn_clear_research"):
+                    st.session_state["deep_research_results"] = {}
+                    st.rerun()
+        else:
+            st.caption("No research results yet. Select modules and click **Run Deep Research**.")
+
     # ---- Full context preview ----
+    st.divider()
     with st.expander("Full LLM Context (raw text sent to curriculum generator)"):
         top_n_raw = st.session_state.get("top_n_ctx", 40)
         skills_ctx = build_skills_context(skills_df, top_n_raw) if skills_df is not None else "None"
@@ -1196,175 +1355,3 @@ with tab_export:
         st.code(str(example_path))
         st.caption("Syllabi are saved in a `syllabi/` subfolder within the program directory.")
 
-
-# ============================================================
-# TAB 5 — DEEP RESEARCH
-# ============================================================
-with tab_research:
-    st.header("Deep Research")
-    st.caption(
-        "Multi-module NotebookLM research on your institution — legal framework, "
-        "competitive landscape, student market, institutional history, and strategic dynamics. "
-        "Results are injected into curriculum generation automatically."
-    )
-
-    _dr_institution = st.session_state.get("_institution", "")
-    _dr_program = st.session_state.get("_program", "")
-
-    if not _dr_institution or not _dr_program:
-        st.warning("Set institution name and program name in **Sources & Setup** first.")
-        st.stop()
-
-    st.info(f"Researching: **{_dr_institution}** / {_dr_program}")
-
-    st.divider()
-
-    # ---- Module selection ----
-    st.subheader("Research Modules")
-    col_mod_l, col_mod_r = st.columns(2)
-    for i, mod in enumerate(MODULE_REGISTRY):
-        col = col_mod_l if i < 3 else col_mod_r
-        with col:
-            st.checkbox(
-                f"{mod['icon']}  {mod['title']}",
-                value=True,
-                key=f"deep_research_mod_{mod['key']}",
-                help=mod["description"],
-            )
-
-    _selected_keys = [
-        m["key"] for m in MODULE_REGISTRY
-        if st.session_state.get(f"deep_research_mod_{m['key']}", True)
-    ]
-    st.caption(f"{len(_selected_keys)} module(s) selected")
-    if not _selected_keys:
-        st.warning("Select at least one module.")
-
-    st.divider()
-
-    # ---- Configuration ----
-    st.subheader("Configuration")
-    _dr_col1, _dr_col2, _dr_col3 = st.columns([3, 1, 1])
-    with _dr_col1:
-        _dr_extra_urls_raw = st.text_area(
-            "Extra seed URLs (one per line, optional)",
-            height=90,
-            key="deep_research_extra_urls",
-            placeholder="https://www.theobserver.ca/tag/my-institution\nhttps://en.wikipedia.org/wiki/...",
-            help="These URLs are added as sources to every module notebook.",
-        )
-    with _dr_col2:
-        _dr_src_timeout = st.number_input(
-            "Source wait (s)", min_value=30, max_value=300, value=120,
-            key="deep_research_src_timeout",
-        )
-    with _dr_col3:
-        _dr_qry_timeout = st.number_input(
-            "Query timeout (s)", min_value=30, max_value=300, value=120,
-            key="deep_research_qry_timeout",
-        )
-
-    _dr_cleanup = st.checkbox(
-        "Delete NotebookLM notebooks after research", value=True,
-        key="deep_research_cleanup",
-    )
-
-    st.divider()
-
-    # ---- Run button ----
-    _run_label = f"Run Deep Research ({len(_selected_keys)} module(s))"
-    _run_disabled = not _selected_keys
-    if st.button(_run_label, type="primary", disabled=_run_disabled, key="btn_deep_research"):
-        _extra_urls = [u.strip() for u in _dr_extra_urls_raw.splitlines() if u.strip()]
-        _ok_count = 0
-        _total = len(_selected_keys)
-
-        for _mod_key in _selected_keys:
-            _mod = next(m for m in MODULE_REGISTRY if m["key"] == _mod_key)
-            with st.status(f"{_mod['icon']}  {_mod['title']}…", expanded=True) as _status:
-                def _make_cb(status_ctx):
-                    def _cb(msg):
-                        status_ctx.write(msg)
-                    return _cb
-
-                _result = run_research_module(
-                    module_key=_mod_key,
-                    institution_name=_dr_institution,
-                    program_name=_dr_program,
-                    extra_urls=_extra_urls or None,
-                    source_wait_timeout=int(_dr_src_timeout),
-                    query_timeout=int(_dr_qry_timeout),
-                    cleanup=_dr_cleanup,
-                    progress_callback=_make_cb(_status),
-                )
-                st.session_state["deep_research_results"][_mod_key] = _result
-
-                if _result["status"] == "ok":
-                    _ok_count += 1
-                    _status.update(label=f"✅ {_mod['title']}", state="complete")
-                else:
-                    _status.update(label=f"❌ {_mod['title']}", state="error")
-                    st.error(f"Error: {_result['error']}")
-                    if _result.get("notebook_id"):
-                        st.caption(f"Orphaned notebook ID (may need manual cleanup): {_result['notebook_id']}")
-
-        if _ok_count == _total:
-            st.success(f"All {_total} module(s) completed successfully.")
-        else:
-            st.warning(f"{_ok_count}/{_total} module(s) succeeded. Failed modules can be re-run individually.")
-
-    st.divider()
-
-    # ---- Results ----
-    _dr_results = st.session_state.get("deep_research_results", {})
-    if _dr_results:
-        st.subheader("Research Results")
-
-        # Status metrics row
-        _metric_cols = st.columns(len(MODULE_REGISTRY))
-        for _ci, _mod in enumerate(MODULE_REGISTRY):
-            _r = _dr_results.get(_mod["key"])
-            if _r is None:
-                _val, _delta = "Pending", None
-            elif _r["status"] == "ok":
-                _val, _delta = "Done", None
-            else:
-                _val, _delta = "Error", None
-            _metric_cols[_ci].metric(f"{_mod['icon']} {_mod['title']}", _val)
-
-        st.divider()
-
-        # Per-module expandable results
-        for _mod in MODULE_REGISTRY:
-            _r = _dr_results.get(_mod["key"])
-            if _r is None:
-                continue
-            _exp_icon = "✅" if _r["status"] == "ok" else "❌"
-            with st.expander(
-                f"{_exp_icon} {_mod['icon']} {_mod['title']}",
-                expanded=(_r["status"] == "error"),
-            ):
-                if _r["status"] == "ok":
-                    _wc = len(_r["answer"].split())
-                    st.caption(f"{_wc:,} words · {_r['sources_added']} extra URL source(s) ingested")
-                    st.markdown(_r["answer"])
-                else:
-                    st.error(f"Module failed: {_r['error']}")
-                    if _r.get("notebook_id"):
-                        st.caption(f"Notebook ID (may need manual cleanup in NotebookLM): {_r['notebook_id']}")
-
-        st.divider()
-
-        # Clear + context preview
-        _col_clr, _ = st.columns([1, 4])
-        with _col_clr:
-            if st.button("Clear all research results", key="btn_clear_research"):
-                st.session_state["deep_research_results"] = {}
-                st.rerun()
-
-        with st.expander("Context preview (what gets sent to curriculum generation)", expanded=False):
-            _ctx_preview = build_deep_research_context(_dr_results)
-            st.text_area("Deep research context", _ctx_preview, height=250, disabled=True)
-
-    else:
-        st.info("No research results yet. Select modules and click **Run Deep Research**.")
