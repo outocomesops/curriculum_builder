@@ -1,0 +1,81 @@
+{
+  "taxonomy": "Bloom's Revised Taxonomy (Anderson & Krathwohl, 2001)",
+  "levels": {
+    "remember": {
+      "cognitive_level": 1,
+      "description": "Retrieve relevant knowledge from long-term memory",
+      "verbs": [
+        "define", "duplicate", "identify", "label", "list", "match",
+        "memorize", "name", "recall", "recognize", "reproduce", "state",
+        "arrange", "cite", "enumerate", "locate", "outline", "quote",
+        "repeat", "select", "sort", "underline", "read", "trace",
+        "copy", "record", "retrieve", "show", "tell", "write"
+      ]
+    },
+    "understand": {
+      "cognitive_level": 2,
+      "description": "Construct meaning from instructional messages including oral, written, and graphic communication",
+      "verbs": [
+        "classify", "compare", "describe", "discuss", "distinguish",
+        "explain", "exemplify", "interpret", "paraphrase", "summarize",
+        "translate", "infer", "contrast", "convert", "differentiate",
+        "estimate", "generalize", "give examples", "illustrate",
+        "predict", "restate", "rewrite", "extend"
+      ]
+    },
+    "apply": {
+      "cognitive_level": 3,
+      "description": "Carry out or use a procedure in a given situation",
+      "verbs": [
+        "apply", "calculate", "carry out", "demonstrate", "execute",
+        "implement", "operate", "practice", "practise", "solve", "use",
+        "construct", "produce", "complete", "compute", "dramatize",
+        "employ", "examine", "modify", "organize", "prepare",
+        "schedule", "show", "sketch", "write", "commit", "contribute",
+        "participate", "perform", "present", "simulate", "test",
+        "manage", "deploy", "configure", "containerize", "automate",
+        "install", "run", "build", "debug", "troubleshoot", "migrate",
+        "provision", "monitor", "publish", "launch", "handle",
+        "process", "transform", "upload", "download", "connect"
+      ]
+    },
+    "analyze": {
+      "cognitive_level": 4,
+      "description": "Break material into its constituent parts and detect how the parts relate to one another",
+      "verbs": [
+        "analyze", "attribute", "break down", "compare", "contrast",
+        "differentiate", "discriminate", "examine", "experiment",
+        "organize", "outline", "question", "test", "deconstruct",
+        "detect", "diagram", "dissect", "focus", "illustrate",
+        "infer", "inspect", "integrate", "inventory", "prioritize",
+        "separate", "subdivide", "investigate", "research", "survey",
+        "categorize", "audit", "map", "trace", "profile"
+      ]
+    },
+    "evaluate": {
+      "cognitive_level": 5,
+      "description": "Make judgments based on criteria and standards",
+      "verbs": [
+        "appraise", "argue", "assess", "check", "conclude",
+        "critique", "defend", "evaluate", "judge", "justify",
+        "measure", "monitor", "prioritize", "recommend", "weigh",
+        "criticize", "debate", "decide", "determine", "disprove",
+        "estimate", "grade", "interpret", "rate", "revise",
+        "score", "select", "support", "value", "verify"
+      ]
+    },
+    "create": {
+      "cognitive_level": 6,
+      "description": "Put elements together to form a coherent or functional whole; reorganize elements into a new pattern or structure",
+      "verbs": [
+        "compose", "construct", "design", "develop", "devise",
+        "formulate", "generate", "hypothesize", "invent", "plan",
+        "produce", "propose", "synthesize", "write", "build",
+        "adapt", "anticipate", "collaborate", "combine", "compile",
+        "create", "derive", "document", "facilitate", "generate",
+        "integrate", "model", "negotiate", "organize", "prepare",
+        "rearrange", "reconstruct", "revise"
+      ]
+    }
+  }
+}

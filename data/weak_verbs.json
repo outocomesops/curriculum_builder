@@ -1,0 +1,112 @@
+{
+  "description": "Vague, unmeasurable, or non-observable verbs commonly found in poorly written learning outcomes",
+  "weak_verbs": [
+    {
+      "verb": "understand",
+      "reason": "unmeasurable — internal mental state, not directly observable",
+      "alternatives_by_level": {
+        "understand": ["explain", "describe", "interpret", "summarize", "paraphrase"],
+        "apply": ["demonstrate", "apply", "use"],
+        "analyze": ["analyze", "examine", "differentiate"]
+      }
+    },
+    {
+      "verb": "know",
+      "reason": "unmeasurable — does not indicate what the student can do with the knowledge",
+      "alternatives_by_level": {
+        "remember": ["identify", "recall", "state", "list", "name"],
+        "understand": ["describe", "explain", "summarize"]
+      }
+    },
+    {
+      "verb": "appreciate",
+      "reason": "affective/attitudinal — not a cognitive outcome and not directly measurable",
+      "alternatives_by_level": {
+        "evaluate": ["assess", "justify", "critique", "appraise"],
+        "understand": ["explain", "describe"]
+      }
+    },
+    {
+      "verb": "learn",
+      "reason": "describes a process, not an outcome — what will they do as a result of learning?",
+      "alternatives_by_level": {
+        "remember": ["recall", "identify", "state"],
+        "understand": ["explain", "describe", "summarize"],
+        "apply": ["apply", "demonstrate"]
+      }
+    },
+    {
+      "verb": "be aware",
+      "reason": "unmeasurable — awareness cannot be directly assessed",
+      "alternatives_by_level": {
+        "remember": ["identify", "recognize", "list"],
+        "understand": ["describe", "explain"]
+      }
+    },
+    {
+      "verb": "be familiar with",
+      "reason": "unmeasurable — familiarity is not an observable behaviour",
+      "alternatives_by_level": {
+        "remember": ["identify", "recognize"],
+        "understand": ["describe", "summarize", "explain"]
+      }
+    },
+    {
+      "verb": "gain knowledge",
+      "reason": "unmeasurable process phrase, not an outcome verb",
+      "alternatives_by_level": {
+        "remember": ["recall", "identify", "state"],
+        "understand": ["explain", "describe"]
+      }
+    },
+    {
+      "verb": "realize",
+      "reason": "internal cognitive event — not directly observable or assessable",
+      "alternatives_by_level": {
+        "understand": ["explain", "describe", "recognize"],
+        "analyze": ["examine", "analyze"]
+      }
+    },
+    {
+      "verb": "grasp",
+      "reason": "informal and unmeasurable — does not specify depth or form of understanding",
+      "alternatives_by_level": {
+        "understand": ["explain", "interpret", "describe"],
+        "apply": ["demonstrate", "apply"]
+      }
+    },
+    {
+      "verb": "comprehend",
+      "reason": "broad and unmeasurable — a synonym of 'understand' with the same weakness",
+      "alternatives_by_level": {
+        "understand": ["explain", "summarize", "paraphrase"],
+        "analyze": ["differentiate", "compare"]
+      }
+    },
+    {
+      "verb": "study",
+      "reason": "describes a learning activity, not a measurable outcome",
+      "alternatives_by_level": {
+        "remember": ["recall", "identify"],
+        "analyze": ["analyze", "examine", "investigate"]
+      }
+    },
+    {
+      "verb": "explore",
+      "reason": "vague process verb — does not indicate what students will be able to do",
+      "alternatives_by_level": {
+        "understand": ["describe", "explain"],
+        "analyze": ["examine", "investigate", "analyze"],
+        "create": ["develop", "design"]
+      }
+    },
+    {
+      "verb": "cover",
+      "reason": "describes curriculum content to be delivered, not a learner behaviour",
+      "alternatives_by_level": {
+        "understand": ["explain", "describe", "summarize"],
+        "apply": ["apply", "demonstrate"]
+      }
+    }
+  ]
+}

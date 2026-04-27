@@ -1,6 +1,6 @@
 # Curriculum Builder
 
-An AI-powered Streamlit application that synthesises job market demand, accreditation standards, and institutional documentation into a complete, publication-ready academic curriculum — using a locally-running Ollama LLM and NotebookLM for deep research.
+An AI-powered Streamlit application that synthesises job market demand, accreditation standards, institutional documentation, and Bloom's Taxonomy alignment into a complete, publication-ready academic curriculum — using a locally-running Ollama LLM and NotebookLM for deep research.
 
 ---
 
@@ -10,7 +10,7 @@ Academic curriculum design is traditionally slow, anecdotal, and disconnected fr
 
 The app produces program-level learning outcomes, a sequenced course list, a competency mapping table, and individual course syllabi. Every generated document is grounded in real skill frequency data from job postings, structured quality standards from accreditation agencies, and the institution's own policies and reputation profile.
 
-The result is a structured, exportable curriculum package: a full PDF for institutional use and a machine-readable `curriculum_export.json` for downstream applications such as course scheduling tools, program comparison dashboards, or accreditation reporting systems.
+Once outcomes are generated, the built-in Bloom's Taxonomy analyser classifies every outcome by cognitive level, flags weak or unmeasurable verbs, shows a distribution chart, and offers AI-assisted rewriting of flagged items — all before the rest of the curriculum is built. The result is a pedagogically grounded, structured, exportable curriculum package: a full PDF for institutional use and a machine-readable `curriculum_export.json` (schema v2.0 includes a full `pedagogy` block) for downstream applications such as committee review tools, program comparison dashboards, or accreditation reporting systems.
 
 ---
 
@@ -22,7 +22,8 @@ The result is a structured, exportable curriculum package: a full PDF for instit
 - **Program specifications loader** — ingests any stakeholder materials folder: Excel, Word, PDF, PowerPoint, images (via Ollama vision), video/audio (via Whisper), CSV, TXT
 - **Institutional reputation research** — profiles the institution via NotebookLM native web research (`nlm research start --auto-import`) or DuckDuckGo + Ollama; injects findings into generation prompts
 - **Deep research engine** — runs up to 5 NotebookLM research modules: Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis; NLM discovers and ingests its own real web sources (deep mode: ~40 sources; fast: ~10)
-- **Four-step curriculum generation** — sequential LLM pipeline: learning outcomes → course list → competency map → individual syllabi; each step streams live to the UI
+- **Bloom's Taxonomy analysis** — classifies every learning outcome by cognitive level (remember → create), flags weak/unmeasurable verbs, displays a distribution bar chart, and offers AI-assisted rewriting of flagged outcomes before course generation begins
+- **Three-step curriculum generation** — sequential LLM pipeline (Tab 4): course list → competency map → individual syllabi; outcomes are authored in Tab 3
 - **PDF export** — saves full curriculum or individual sections as formatted PDFs in a dated folder hierarchy (`outputs/{Institution}/{YYYY-MM}/{Program}/`)
 - **JSON export** — produces a structured `curriculum_export.json` with all inputs and generated content; downloadable from the browser or saved to the output folder
 - **Institutional summary cache** — fingerprints the document set and saves consolidated summaries to disk; avoids re-summarisation when documents are unchanged
@@ -31,7 +32,7 @@ The result is a structured, exportable curriculum package: a full PDF for instit
 
 ## Architecture Overview
 
-The app follows a linear data pipeline across four Streamlit tabs. Loaders ingest heterogeneous source data, the generator builds LLM context and streams curriculum text, and exporters write the output to PDF and JSON.
+The app follows a five-tab pipeline. Loaders ingest heterogeneous source data, the generator builds LLM context and streams curriculum text, the Bloom analyser classifies outcomes, and exporters write output to PDF and JSON.
 
 ```
 jobs.db / CSV ──► job_loader ──────────────────────────────► skills_df
@@ -41,17 +42,23 @@ program specs folder ──► program_specs_loader ─────────�
 reputation sources ──► reputation_loader_nlm ───────────► reputation summary
 NotebookLM modules ──► deep_research_loader ────────────► research results
                                     │
-                            prompt_builder (assembles context)
+                            prompt_builder (assembles context)          [Tab 2]
                                     │
-                    curriculum_gen (Ollama streaming API)
+                    curriculum_gen → generate_learning_outcomes          [Tab 3]
                                     │
-              ┌─────────────────────┼──────────────────────┐
+              bloom_outcome_extractor → analyze_all_outcomes             [Tab 3]
+              → analyze_coverage → improve_outcome (Bloom pipeline)
+                                    │
+                    curriculum_gen → course list, map, syllabi           [Tab 4]
+                                    │
+              ┌─────────────────────┼──────────────────────┐           [Tab 5]
               ▼                     ▼                       ▼
          pdf_exporter        curriculum_exporter      session_state
-    (PDF files on disk)    (curriculum_export.json)   (live UI display)
+    (PDF files on disk)  (curriculum_export.json     (live UI display)
+                          schema v1.0 or v2.0)
 ```
 
-All Ollama calls use `POST /api/chat` with `stream: true`. Doc summarisation uses `stream: false`. Models are discovered at startup via `GET /api/tags`.
+All Ollama calls use `POST /api/chat` with `stream: true`. Doc summarisation uses `stream: false`. Models are discovered at startup via `GET /api/tags`. Bloom keyword classification uses `bloom_verbs.json`; unresolved verbs fall back to Ollama LLM classification.
 
 ---
 
@@ -84,19 +91,22 @@ The app opens at `http://localhost:8501` (or the next available port).
 
 ## Usage
 
-The app is divided into four tabs, intended to be used in order:
+The app is divided into five tabs, intended to be used in order:
 
 **Tab 1 — Sources & Setup**
-Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs. Optionally run a reputation research query via NotebookLM or DuckDuckGo + Ollama.
+Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs. Optionally run a reputation research query via NotebookLM.
 
 **Tab 2 — Context & Research**
-The central intelligence tab. Review loaded skills and agency requirements, summarise and consolidate institutional documents, and run the five NotebookLM deep research modules (Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis). Deep research results are automatically injected into curriculum generation prompts. The full assembled LLM context is visible for inspection.
+The central intelligence tab. Review loaded skills and agency requirements, summarise and consolidate institutional documents, and run the five NotebookLM deep research modules (Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis). Deep research results are automatically injected into generation prompts. The full assembled LLM context is visible for inspection.
 
-**Tab 3 — Generate**
-Run the four-step pipeline sequentially. Each step streams output live. Steps: (1) Learning Outcomes, (2) Course List, (3) Competency Map, (4) Individual Syllabi.
+**Tab 3 — Outcomes & Bloom**
+Three-step sub-pipeline: (1) Generate learning outcomes from all gathered context — streams live. (2) Run Bloom's Taxonomy analysis — classifies every outcome by cognitive level, shows KPI metrics, a level distribution bar chart, and a filterable outcome table with flags. (3) Refine flagged outcomes — for each outcome with weak or unmeasurable verbs, generate an AI-written rewrite and approve it to replace the original in the learning outcomes text.
 
-**Tab 4 — Export**
-Save the full curriculum or individual sections as PDFs. Download the curriculum as Markdown or as `curriculum_export.json`. Save the JSON to the output folder alongside the PDFs.
+**Tab 4 — Generate**
+Run the three remaining curriculum generation steps, each streaming live. Requires learning outcomes from Tab 3. Steps: (1) Course List, (2) Competency Map, (3) Individual Syllabi (select which courses to generate).
+
+**Tab 5 — Export**
+Save the full curriculum or individual sections as PDFs. Download the curriculum as Markdown or as `curriculum_export.json` (schema v2.0 with `pedagogy` block if Bloom analysis was run, v1.0 otherwise). Save the JSON to the output folder alongside the PDFs.
 
 ---
 

@@ -9,12 +9,15 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pandas as pd
 
+from exporter.bloom_exporter import build_pedagogy_block
+
 
 SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION_PEDAGOGY = "2.0"
 
 
 def _sanitize_folder(name: str) -> str:
@@ -40,6 +43,8 @@ def build_curriculum_export(
     course_list: str,
     competency_map: str,
     syllabi: dict[str, str],
+    analysis_results: Optional[list] = None,
+    coverage: Optional[Any] = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
 
@@ -88,8 +93,10 @@ def build_curriculum_export(
         },
     }
 
-    return {
-        "schema_version": SCHEMA_VERSION,
+    schema = SCHEMA_VERSION_PEDAGOGY if (analysis_results and coverage) else SCHEMA_VERSION
+
+    export: dict[str, Any] = {
+        "schema_version": schema,
         "generated_at": now.isoformat(),
         "metadata": {
             "institution_name": institution_name,
@@ -145,6 +152,11 @@ def build_curriculum_export(
             },
         },
     }
+
+    if analysis_results and coverage:
+        export["pedagogy"] = build_pedagogy_block(analysis_results, coverage)
+
+    return export
 
 
 def save_curriculum_export(

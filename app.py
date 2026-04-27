@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (
     OLLAMA_DEFAULT_URL, OUTPUTS_DIR, SUPPORTED_LANGUAGES, PROGRAM_LEVELS,
     JOB_MARKET_DB, QUALITY_SOURCES_DIR, INSTITUTIONAL_DOCS_DIR, INSTITUTIONS_DIR,
+    BLOOM_LEVEL_ORDER, BLOOM_LEVEL_COLORS, OUTCOME_TYPE_LABELS,
 )
 from utils.institutional_cache import load_cache, save_cache, cache_path
 from loaders.job_loader import get_available_queries, load_skills_from_db, load_skills_from_csv
@@ -60,6 +61,12 @@ from exporter.pdf_exporter import (
     _UNICODE_FONT_PATH,
 )
 from exporter.curriculum_exporter import build_curriculum_export, save_curriculum_export
+from loaders.bloom_loader import load_bloom_taxonomy
+from loaders.bloom_outcome_extractor import extract_outcomes_from_markdown
+from analyzers.outcome_analyzer import analyze_all_outcomes
+from analyzers.coverage_analyzer import analyze_coverage
+from generator.outcome_improver import improve_outcome
+from generator.bloom_prompt_builder import build_improvement_prompt
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -92,6 +99,9 @@ _DEFAULTS = {
     "course_list": "",
     "competency_map": "",
     "syllabi": {},
+    "outcomes": [],           # list[OutcomeRecord]
+    "analysis_results": [],   # list[AnalysisResult]
+    "coverage": None,         # CoverageReport | None
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -145,11 +155,12 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_sources, tab_context, tab_generate, tab_export = st.tabs([
+tab_sources, tab_context, tab_bloom, tab_generate, tab_export = st.tabs([
     "1  Sources & Setup",
     "2  Context & Research",
-    "3  Generate",
-    "4  Export",
+    "3  Outcomes & Bloom",
+    "4  Generate",
+    "5  Export",
 ])
 
 
@@ -934,7 +945,269 @@ with tab_context:
 
 
 # ============================================================
-# TAB 3 — GENERATE
+# TAB 3 — OUTCOMES & BLOOM
+# ============================================================
+with tab_bloom:
+    st.header("Outcomes & Bloom Analysis")
+
+    _bloom_institution = st.session_state.get("_institution", "")
+    _bloom_program = st.session_state.get("_program", "")
+    _bloom_program_level = st.session_state.get("_program_level", "Undergraduate")
+    _bloom_course_hours = st.session_state.get("_course_hours")
+
+    if not _bloom_institution or not _bloom_program:
+        st.warning("Set institution name and program name in **Sources & Setup** first.")
+        st.stop()
+
+    _bloom_col1, _bloom_col2 = st.columns([2, 5])
+    with _bloom_col1:
+        if available_models:
+            model_bloom = st.selectbox("LLM model", options=available_models, key="model_bloom")
+        else:
+            model_bloom = st.text_input("LLM model", value="llama3", key="model_bloom")
+
+    _bloom_hours_label = (
+        f" — {_bloom_course_hours} contact hours"
+        if _bloom_program_level == "Continuous Education" and _bloom_course_hours else ""
+    )
+    st.caption(
+        f"Program: **{_bloom_program}** ({_bloom_program_level}{_bloom_hours_label}) — {_bloom_institution}"
+    )
+
+    _bloom_skills_df = st.session_state["skills_df"]
+    _bloom_agencies = st.session_state["agencies"]
+
+    _bloom_top_n = st.slider("Top N skills to include", 10, 80, 40, key="top_n_bloom")
+    _bloom_skills_ctx = build_skills_context(_bloom_skills_df, _bloom_top_n) if _bloom_skills_df is not None else "None loaded."
+    _bloom_acc_ctx = build_accreditation_context(_bloom_agencies)
+    _bloom_inst_ctx = build_institutional_context(
+        st.session_state["consolidated_summary"],
+        st.session_state["doc_summaries"],
+    )
+    _bloom_rep_ctx = build_reputation_context(st.session_state["reputation_summary"])
+    _bloom_specs_ctx = build_program_specs_context(st.session_state.get("program_specs_docs", []))
+    _bloom_dr_ctx = build_deep_research_context(st.session_state.get("deep_research_results", {}))
+
+    _bloom_scope_labels = list({
+        s for a in _bloom_agencies for s in (
+            a["program_scope"] if isinstance(a["program_scope"], list) else [a["program_scope"]]
+        )
+    })
+    _bloom_scope_str = ", ".join(_bloom_scope_labels) if _bloom_scope_labels else "general higher education"
+
+    st.divider()
+
+    # ---- Section A: Generate Learning Outcomes ----
+    st.subheader("Step 1 — Generate Learning Outcomes")
+
+    if st.button("Generate Learning Outcomes", type="primary", key="btn_bloom_outcomes"):
+        _lo_container = st.empty()
+        _lo_full = ""
+        with st.spinner("Generating..."):
+            for chunk in generate_learning_outcomes(
+                _bloom_program, _bloom_program_level, _bloom_scope_str,
+                _bloom_skills_ctx, _bloom_acc_ctx, _bloom_inst_ctx, language, ollama_url, model_bloom,
+                course_hours=_bloom_course_hours,
+                reputation_context=_bloom_rep_ctx,
+                program_specs_context=_bloom_specs_ctx,
+                deep_research_context=_bloom_dr_ctx,
+            ):
+                _lo_full += chunk
+                _lo_container.markdown(_lo_full)
+        st.session_state["learning_outcomes"] = _lo_full
+        # Reset downstream Bloom state when outcomes are regenerated
+        st.session_state["analysis_results"] = []
+        st.session_state["coverage"] = None
+        st.success("Learning outcomes generated.")
+
+    elif st.session_state["learning_outcomes"]:
+        with st.expander("Learning outcomes (generated)", expanded=False):
+            st.markdown(st.session_state["learning_outcomes"])
+        if st.button("Regenerate Learning Outcomes", key="btn_bloom_regen_outcomes"):
+            st.session_state["learning_outcomes"] = ""
+            st.session_state["course_list"] = ""
+            st.session_state["competency_map"] = ""
+            st.session_state["syllabi"] = {}
+            st.session_state["analysis_results"] = []
+            st.session_state["coverage"] = None
+            st.rerun()
+
+    st.divider()
+
+    # ---- Section B: Bloom Analysis ----
+    st.subheader("Step 2 — Bloom's Taxonomy Analysis")
+
+    _has_outcomes = bool(st.session_state["learning_outcomes"].strip())
+    _has_analysis = bool(st.session_state["analysis_results"])
+
+    if not _has_outcomes:
+        st.info("Generate learning outcomes in Step 1 first.")
+    else:
+        if st.button("Run Bloom Analysis", type="primary", key="btn_bloom_analyze", disabled=not _has_outcomes):
+            with st.spinner("Classifying outcomes..."):
+                try:
+                    _verb_index, _weak_lookup, _bloom_data = load_bloom_taxonomy()
+                    _outcomes = extract_outcomes_from_markdown(
+                        st.session_state["learning_outcomes"],
+                        program_name=_bloom_program,
+                        institution_name=_bloom_institution,
+                    )
+                    _results = analyze_all_outcomes(
+                        _outcomes, _verb_index, _weak_lookup,
+                        ollama_url, model_bloom,
+                        use_ollama_fallback=True,
+                    )
+                    _coverage = analyze_coverage(_results)
+                    st.session_state["outcomes"] = _outcomes
+                    st.session_state["analysis_results"] = _results
+                    st.session_state["coverage"] = _coverage
+                    st.success(f"Analyzed {len(_results)} outcome(s).")
+                except Exception as exc:
+                    st.error(f"Bloom analysis failed: {exc}")
+
+        if _has_analysis:
+            _cov = st.session_state["coverage"]
+            _results = st.session_state["analysis_results"]
+
+            # KPI row
+            _kpi1, _kpi2, _kpi3, _kpi4 = st.columns(4)
+            _kpi1.metric("Outcomes analyzed", _cov.outcomes_analyzed)
+            _kpi2.metric("Weak verbs", _cov.weak_verb_count)
+            _kpi3.metric("Levels covered", f"{len([l for l,c in _cov.distribution.items() if c>0])}/6")
+            _kpi4.metric("Coverage score", f"{_cov.coverage_score:.0%}")
+
+            # Pedagogical flags
+            if _cov.flags:
+                st.warning("**Pedagogical flags:**")
+                for flag in _cov.flags:
+                    st.warning(f"⚠ {flag}")
+
+            # Bloom distribution bar chart
+            st.subheader("Bloom Level Distribution")
+            import altair as alt
+            _dist_df = pd.DataFrame([
+                {"Level": lvl.capitalize(), "Count": _cov.distribution.get(lvl, 0), "Color": BLOOM_LEVEL_COLORS.get(lvl, "#888")}
+                for lvl in BLOOM_LEVEL_ORDER
+            ])
+            _chart = (
+                alt.Chart(_dist_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Level:N", sort=None, title="Bloom Level"),
+                    y=alt.Y("Count:Q", title="# Outcomes"),
+                    color=alt.Color("Level:N", scale=alt.Scale(
+                        domain=[r["Level"] for r in _dist_df.to_dict("records")],
+                        range=[r["Color"] for r in _dist_df.to_dict("records")],
+                    ), legend=None),
+                    tooltip=["Level", "Count"],
+                )
+                .properties(height=250)
+            )
+            st.altair_chart(_chart, use_container_width=True)
+
+            # Outcomes table
+            st.subheader("Outcome Classification Table")
+            _filter_flags = st.checkbox("Show only flagged outcomes", key="bloom_filter_flags")
+            _table_rows = []
+            for r in _results:
+                _flagged = bool(r.issues)
+                if _filter_flags and not _flagged:
+                    continue
+                _table_rows.append({
+                    "ID": r.outcome_id,
+                    "Type": OUTCOME_TYPE_LABELS.get(r.outcome_type, r.outcome_type),
+                    "Verb": r.extracted_verb or "—",
+                    "Bloom Level": r.classification.bloom_level.capitalize() if r.classification.bloom_level else "Unclassified",
+                    "Level #": r.classification.bloom_level_num or "—",
+                    "Source": r.classification.source,
+                    "Weak": "⚠" if r.is_weak_verb else "",
+                    "Issues": "; ".join(r.issues) if r.issues else "",
+                })
+            if _table_rows:
+                st.dataframe(pd.DataFrame(_table_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No outcomes to display.")
+
+    st.divider()
+
+    # ---- Section C: Refine Flagged Outcomes ----
+    st.subheader("Step 3 — Refine Flagged Outcomes")
+
+    _results_c = st.session_state["analysis_results"]
+    _flagged = [r for r in _results_c if r.issues]
+
+    if not _results_c:
+        st.info("Run Bloom Analysis in Step 2 to identify flagged outcomes.")
+    elif not _flagged:
+        st.success("No flagged outcomes — all outcomes use measurable Bloom-aligned verbs.")
+    else:
+        st.caption(
+            f"{len(_flagged)} outcome(s) have issues. Generate an improved version, "
+            "review it, then Approve to replace the original in the learning outcomes text."
+        )
+        try:
+            _, _, _improve_bloom_data = load_bloom_taxonomy()
+        except Exception:
+            _improve_bloom_data = {}
+
+        _program_ctx = {
+            "institution": _bloom_institution,
+            "program": _bloom_program,
+            "level": _bloom_program_level,
+            "top_skills": [
+                str(row.get("skill_name", ""))
+                for _, row in (_bloom_skills_df.head(5).iterrows() if _bloom_skills_df is not None else [])
+            ],
+        }
+
+        for _r in _flagged:
+            with st.expander(f"{_r.outcome_id} — {_r.original_text[:80]}{'...' if len(_r.original_text)>80 else ''}", expanded=False):
+                st.markdown(f"**Original:** {_r.original_text}")
+                if _r.issues:
+                    for _iss in _r.issues:
+                        st.warning(_iss)
+                if _r.suggested_verbs:
+                    st.caption(f"Suggested verbs: {', '.join(_r.suggested_verbs[:6])}")
+
+                _improve_key = f"improve_{_r.outcome_id}"
+                _approve_key = f"approve_{_r.outcome_id}"
+                _text_key = f"text_{_r.outcome_id}"
+
+                if _r.improvement_approved:
+                    st.success(f"✅ Approved: {_r.improved_text}")
+                else:
+                    if _r.improved_text:
+                        _r.improved_text = st.text_area(
+                            "Improved outcome (editable)", value=_r.improved_text, key=_text_key
+                        )
+                    else:
+                        if _improve_bloom_data:
+                            if st.button("Generate Improvement", key=_improve_key):
+                                _prompt = build_improvement_prompt(_r, _r, _program_ctx, _improve_bloom_data)
+                                _imp_text = ""
+                                _imp_container = st.empty()
+                                for _chunk in improve_outcome(_prompt, ollama_url, model_bloom):
+                                    _imp_text += _chunk
+                                    _imp_container.markdown(_imp_text)
+                                _r.improved_text = _imp_text.strip()
+                                st.rerun()
+                        else:
+                            st.info("Could not load Bloom data for improvement prompt.")
+
+                    if _r.improved_text and st.button("Approve & Replace", key=_approve_key, type="primary"):
+                        _orig = _r.original_text
+                        _new = _r.improved_text
+                        _r.improvement_approved = True
+                        # Replace in the learning outcomes markdown (safe: each outcome text is unique)
+                        st.session_state["learning_outcomes"] = st.session_state["learning_outcomes"].replace(
+                            _orig, _new, 1
+                        )
+                        st.success("Replaced in learning outcomes.")
+                        st.rerun()
+
+
+# ============================================================
+# TAB 4 — GENERATE
 # ============================================================
 with tab_generate:
     st.header("Generate Curriculum")
@@ -946,6 +1219,10 @@ with tab_generate:
 
     if not institution_name or not program_name:
         st.warning("Set institution name and program name in **Sources & Setup** first.")
+        st.stop()
+
+    if not st.session_state["learning_outcomes"].strip():
+        st.info("Generate learning outcomes in **Outcomes & Bloom** (Tab 3) first.")
         st.stop()
 
     # Model selector for this tab
@@ -983,19 +1260,17 @@ with tab_generate:
 
     # ---- Overall progress indicator ----
     steps_done = sum([
-        bool(st.session_state["learning_outcomes"]),
         bool(st.session_state["course_list"]),
         bool(st.session_state["competency_map"]),
         bool(st.session_state["syllabi"]),
     ])
-    step_labels = ["Learning Outcomes", "Course List", "Competency Map", "Syllabi"]
-    progress_cols = st.columns(4)
+    step_labels = ["Course List", "Competency Map", "Syllabi"]
+    progress_cols = st.columns(3)
     for idx, (col, label) in enumerate(zip(progress_cols, step_labels)):
-        is_done = idx < steps_done or (
-            (idx == 0 and st.session_state["learning_outcomes"]) or
-            (idx == 1 and st.session_state["course_list"]) or
-            (idx == 2 and st.session_state["competency_map"]) or
-            (idx == 3 and st.session_state["syllabi"])
+        is_done = (
+            (idx == 0 and st.session_state["course_list"]) or
+            (idx == 1 and st.session_state["competency_map"]) or
+            (idx == 2 and st.session_state["syllabi"])
         )
         col.metric(
             label=f"Step {idx + 1}",
@@ -1003,46 +1278,17 @@ with tab_generate:
             delta=label,
             delta_color="off",
         )
-    st.progress(steps_done / 4, text=f"{steps_done}/4 steps complete")
+    st.progress(steps_done / 3, text=f"{steps_done}/3 steps complete")
+
+    # Show current learning outcomes summary
+    with st.expander("Learning outcomes (from Tab 3)", expanded=False):
+        st.markdown(st.session_state["learning_outcomes"])
 
     st.divider()
 
-    # --- Step 1: Learning Outcomes ---
-    st.subheader("Step 1 — Program Overview & Learning Outcomes")
-    if st.button("Generate Learning Outcomes", type="primary", key="btn_outcomes"):
-        container = st.empty()
-        full_text = ""
-        with st.spinner("Generating..."):
-            for chunk in generate_learning_outcomes(
-                program_name, program_level, program_scope_str,
-                skills_ctx, acc_ctx, inst_ctx, language, ollama_url, model_gen,
-                course_hours=course_hours,
-                reputation_context=rep_ctx,
-                program_specs_context=specs_ctx,
-                deep_research_context=deep_research_ctx,
-            ):
-                full_text += chunk
-                container.markdown(full_text)
-        st.session_state["learning_outcomes"] = full_text
-        st.success("Learning outcomes generated.")
-
-    elif st.session_state["learning_outcomes"]:
-        with st.expander("Learning outcomes (generated)", expanded=False):
-            st.markdown(st.session_state["learning_outcomes"])
-        if st.button("Regenerate Learning Outcomes", key="btn_regen_outcomes"):
-            st.session_state["learning_outcomes"] = ""
-            st.session_state["course_list"] = ""
-            st.session_state["competency_map"] = ""
-            st.session_state["syllabi"] = {}
-            st.rerun()
-
-    st.divider()
-
-    # --- Step 2: Course List ---
-    st.subheader("Step 2 — Course List")
-    if not st.session_state["learning_outcomes"]:
-        st.info("Complete Step 1 first.")
-    else:
+    # --- Step 1: Course List ---
+    st.subheader("Step 1 — Course List")
+    if True:
         if st.button("Generate Course List", type="primary", key="btn_courses"):
             container2 = st.empty()
             full_text2 = ""
@@ -1071,10 +1317,10 @@ with tab_generate:
 
     st.divider()
 
-    # --- Step 3: Competency Map ---
-    st.subheader("Step 3 — Competency Map")
+    # --- Step 2: Competency Map ---
+    st.subheader("Step 2 — Competency Map")
     if not st.session_state["course_list"]:
-        st.info("Complete Step 2 first.")
+        st.info("Complete Step 1 first.")
     else:
         if st.button("Generate Competency Map", type="primary", key="btn_map"):
             container3 = st.empty()
@@ -1104,10 +1350,10 @@ with tab_generate:
 
     st.divider()
 
-    # --- Step 4: Individual Syllabi ---
-    st.subheader("Step 4 — Individual Course Syllabi")
+    # --- Step 3: Individual Syllabi ---
+    st.subheader("Step 3 — Individual Course Syllabi")
     if not st.session_state["course_list"]:
-        st.info("Complete Step 2 first.")
+        st.info("Complete Step 1 first.")
     else:
         st.caption(
             "Extract course codes and names from the generated list, "
@@ -1187,7 +1433,7 @@ with tab_generate:
 
 
 # ============================================================
-# TAB 4 — EXPORT
+# TAB 5 — EXPORT
 # ============================================================
 with tab_export:
     st.header("Export & Save")
@@ -1203,8 +1449,12 @@ with tab_export:
 
     n_sections = sum(1 for t in [outcomes, courses, cmap] if t.strip())
     n_syllabi = len(syllabi)
+    has_bloom = bool(st.session_state.get("analysis_results"))
 
-    st.markdown(f"**Ready to export:** {n_sections} program section(s) + {n_syllabi} syllabus/syllabi")
+    _export_status = f"**Ready to export:** {n_sections} program section(s) + {n_syllabi} syllabus/syllabi"
+    if has_bloom:
+        _export_status += " + Bloom pedagogy block (schema v2.0)"
+    st.markdown(_export_status)
 
     if not institution_name or not program_name:
         st.warning("Set institution and program name in **Sources & Setup** first.")
@@ -1247,7 +1497,7 @@ with tab_export:
         with col_b:
             st.subheader("Save Individual Section PDFs")
             st.caption("Save each section as a separate PDF file.")
-            if st.button("Save Section PDFs", key="save_sections"):
+            if st.button("Save Section PDFs", key="save_sections"):  # noqa
                 saved = []
                 with st.spinner("Building PDFs..."):
                     section_map = {
@@ -1320,6 +1570,8 @@ with tab_export:
                 course_list=courses,
                 competency_map=cmap,
                 syllabi=syllabi,
+                analysis_results=st.session_state.get("analysis_results") or None,
+                coverage=st.session_state.get("coverage"),
             )
             st.download_button(
                 label="Download curriculum_export.json",

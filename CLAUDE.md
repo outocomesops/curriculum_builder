@@ -256,3 +256,43 @@ outputs/
 - Run the full end-to-end pipeline: Tab 1 → load data → Tab 2 → run one deep research module (fast mode for speed) → Tab 3 → generate learning outcomes; verify deep research context appears in the prompt
 - Add unit tests for `exporter/curriculum_exporter.py`
 - Implement `utils/deep_research_cache.py` to persist deep research results between browser sessions
+
+---
+
+## Session Log — 2026-04-26
+
+### Changes Made
+- **New Tab 3 — Outcomes & Bloom** — embedded full Bloom's Taxonomy analysis pipeline as a new tab between "Context & Research" and "Generate"; app now has 5 tabs: Sources & Setup → Context & Research → Outcomes & Bloom → Generate → Export
+- **`analyzers/` package** — ported and adapted four files from `pedagogy_context`: `verb_extractor.py`, `bloom_classifier.py`, `outcome_analyzer.py`, `coverage_analyzer.py`; removed `pedagogy_context` config imports, inlined OLLAMA constants
+- **`data/bloom_verbs.json`, `data/weak_verbs.json`** — copied verb banks from `pedagogy_context`
+- **`loaders/bloom_loader.py`** — ported with data path relative to `data/` directory; added `load_bloom_taxonomy()` convenience function returning `(verb_index, weak_lookup, bloom_data)` in one call
+- **`loaders/bloom_outcome_extractor.py`** — new file (no equivalent in `pedagogy_context`); parses learning outcomes markdown directly from `session_state["learning_outcomes"]` using `_parse_peos()` and `_parse_slos()` logic; replaces `curriculum_loader.py` which read from a JSON file
+- **`generator/outcome_improver.py`** — ported; config imports replaced with inlined `_OLLAMA_TEMPERATURE_GENERATION = 0.4`; streams Ollama-generated outcome rewrites
+- **`generator/bloom_prompt_builder.py`** — ported `build_improvement_prompt()` from `pedagogy_context`; builds Bloom-aligned rewrite prompt with institution/program context
+- **`exporter/bloom_exporter.py`** — ported `build_pedagogy_block()` and `merge_with_curriculum()`; removed all file I/O (save handled by curriculum_exporter)
+- **`config.py`** — added `BLOOM_LEVEL_ORDER`, `BLOOM_LEVEL_COLORS`, `OUTCOME_TYPE_LABELS`, `BLOOM_VERBS_FILE`, `WEAK_VERBS_FILE`
+- **`exporter/curriculum_exporter.py`** — added optional `analysis_results` and `coverage` params; sets `schema_version="2.0"` and appends `pedagogy` block when Bloom analysis has been run
+- **`app.py`** — major refactor: 5-tab layout; new Tab 3 (Step 1: generate outcomes, Step 2: Bloom analysis with KPI row + bar chart + filterable table, Step 3: refine flagged outcomes with AI rewrite + approve flow); Tab 4 (Generate) now starts at Course List with guard requiring outcomes from Tab 3; Tab 5 Export passes analysis_results/coverage to exporter; Bloom session state keys added to `_DEFAULTS`
+
+### Decisions & Rationale
+- Bloom tab placed at position 3 (before Generate) so all research inputs are present when outcomes are written, and Bloom alignment happens immediately after — before courses and syllabi are generated from those outcomes
+- `bloom_outcome_extractor.py` parses markdown directly (no JSON roundtrip) — simpler, always in sync with the actual generated text; reuses `_parse_peos` and `_parse_slos` logic from `pedagogy_context/loaders/curriculum_loader.py` which already handles the exact markdown format that `curriculum_gen.generate_learning_outcomes()` produces
+- `bloom_exporter.py` has no file I/O — the curriculum_exporter owns all disk writes; single responsibility, independently testable
+- `curriculum_exporter.py` schema auto-upgrades to "2.0" only when Bloom analysis is present — backwards compatible, downstream apps can check `schema_version` to know whether to expect the `pedagogy` block
+- Ollama constants inlined in analyzer files (`OLLAMA_TEMPERATURE_ANALYSIS = 0.1`) rather than pulled from config — avoids config bloat for values that are Bloom-specific and unlikely to need user tuning
+- Approval flow uses `str.replace(original_text, improved_text, 1)` — safe because each outcome sentence is unique within the markdown; simpler than line-by-line diffing
+- Tab 4 guard uses `st.stop()` on empty learning_outcomes — prevents users from attempting to generate course lists without outcomes, which would produce incoherent output
+
+### Known Issues / TODOs
+- Deep research results are still not cached to disk — `utils/deep_research_cache.py` remains a TODO
+- No per-module re-run button in Tab 2 (Deep Research)
+- `curriculum_exporter.py` and new Bloom modules have no unit tests yet
+- JSON export not auto-triggered at end of generation pipeline
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+- `pedagogy_context` app has not yet been simplified (remove Bloom tabs, keep only Quality Committee) — that work is deferred
+- Tab 3 Bloom analysis chart requires `altair` — already in requirements.txt via Streamlit, but worth verifying in fresh envs
+
+### Next Session Starting Point
+- Test Tab 3 end-to-end: Tab 1 → load skills + agencies → Tab 2 → Tab 3 → generate outcomes → Run Bloom Analysis → confirm chart renders, table populates, approve one refinement → Tab 4 → generate course list (confirm it receives refined outcomes) → Tab 5 → download JSON → confirm `schema_version: "2.0"` and `pedagogy` block present
+- Simplify `pedagogy_context` app: remove Tabs 1–4 (Load, Bloom, Improve, Export); add Load tab that reads `curriculum_export_pedagogy.json` schema v2.0 and reconstructs `analysis_results`/`coverage` from the `pedagogy` block; keep Quality Committee tabs unchanged
+- Add unit tests for `loaders/bloom_outcome_extractor.py`, `analyzers/coverage_analyzer.py`, `exporter/bloom_exporter.py`
