@@ -31,12 +31,10 @@ from loaders.doc_loader import load_institutional_docs
 from loaders.program_specs_loader import load_program_specs
 from loaders.deep_research_loader import MODULE_REGISTRY, run_research_module, build_deep_research_context
 from loaders.pdf_downloader import scrape_pdf_links, download_pdfs
-from loaders.reputation_loader import fetch_reputation_snippets
-from loaders.reputation_loader_nlm import fetch_reputation_via_notebooklm
+from loaders.nlm_client import check_auth, AUTH_HINT
 from generator.doc_summarizer import (
     batch_summarize,
     consolidate_summaries,
-    summarize_reputation,
     summarize_doc,
 )
 from generator.prompt_builder import (
@@ -79,6 +77,18 @@ st.set_page_config(
 )
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# NotebookLM auth check — shown once at startup
+# ---------------------------------------------------------------------------
+_nlm_auth_ok, _ = check_auth()
+if not _nlm_auth_ok:
+    st.warning(
+        "**NotebookLM auth missing.** "
+        "The Reputation and Deep Research features need valid credentials. "
+        "Type `! nlm login` in the Claude Code prompt to re-authenticate, then refresh this page.",
+        icon="🔑",
+    )
 
 # ---------------------------------------------------------------------------
 # Session state defaults
@@ -487,132 +497,6 @@ with tab_sources:
                         if ok:
                             st.info(f"Auto-loaded {len(ok)} document(s) — ready for summarisation in Context Preview.")
 
-    # ---- Institutional Reputation ----
-    st.divider()
-    with st.expander("Institutional Reputation (Public Perception)", expanded=False):
-        inst_for_rep = institution_name
-        if not inst_for_rep:
-            st.info("Enter the institution name above first.")
-        else:
-            st.markdown(
-                f"Research public perception of **{inst_for_rep}** "
-                "(reviews, rankings, news, graduate outcomes)."
-            )
-
-            col_rep1, col_rep2, col_rep3 = st.columns([3, 2, 1])
-            with col_rep1:
-                rep_name_override = st.text_input(
-                    "Institution name for search (edit if needed)",
-                    value=inst_for_rep,
-                    key="rep_name",
-                )
-            with col_rep2:
-                rep_city = st.text_input(
-                    "City / region (optional)",
-                    placeholder="e.g. Sarnia, Ontario",
-                    key="rep_city",
-                )
-            with col_rep3:
-                max_results = st.number_input("Results per query", min_value=3, max_value=15, value=5)
-
-            # --- NotebookLM research (primary) ---
-            st.markdown("**Option 1 — Research via NotebookLM** *(recommended)*")
-            st.caption(
-                "Creates a NotebookLM notebook, loads web sources about the institution, "
-                "and queries them for a structured reputation summary."
-            )
-            extra_urls_raw = st.text_area(
-                "Extra URLs to include as sources (one per line, optional)",
-                height=80,
-                key="rep_extra_urls",
-                placeholder="https://www.theobserver.ca/tag/lambton-college\nhttps://en.wikipedia.org/wiki/Lambton_College",
-            )
-            nlm_cleanup = st.checkbox(
-                "Delete NotebookLM notebook after research", value=True, key="rep_nlm_cleanup"
-            )
-
-            if st.button("Research Reputation via NotebookLM", type="primary", key="btn_rep_nlm"):
-                extra_urls = [u.strip() for u in extra_urls_raw.splitlines() if u.strip()]
-                with st.spinner("Creating NotebookLM notebook and loading web sources…"):
-                    try:
-                        nb_id, rep_summary = fetch_reputation_via_notebooklm(
-                            institution_name=rep_name_override,
-                            city=rep_city,
-                            extra_urls=extra_urls or None,
-                            cleanup=nlm_cleanup,
-                            research_timeout=420,
-                            research_mode="deep",
-                            query_timeout=120,
-                        )
-                        st.session_state["reputation_summary"] = rep_summary
-                        st.session_state["reputation_snippets"] = []
-                        st.session_state["reputation_nlm_notebook_id"] = "" if nlm_cleanup else nb_id
-                        if not nlm_cleanup:
-                            st.info(f"Notebook kept — ID: `{nb_id}`")
-                        st.success("Reputation profile ready.")
-                    except Exception as exc:
-                        st.error(f"NotebookLM research failed: {exc}")
-
-            st.divider()
-
-            # --- DuckDuckGo fallback ---
-            st.markdown("**Option 2 — Web search + Ollama analysis** *(fallback)*")
-            _rep_ddg_col1, _rep_ddg_col2 = st.columns([2, 3])
-            with _rep_ddg_col1:
-                _rep_model = (
-                    st.selectbox("Model for analysis", options=available_models, key="rep_model")
-                    if available_models
-                    else st.text_input("Model for analysis", value="llama3", key="rep_model")
-                )
-            if st.button("Search & Analyse Reputation (DuckDuckGo)", key="btn_rep_ddg"):
-                with st.spinner("Searching the web for reputation data..."):
-                    snippets = fetch_reputation_snippets(rep_name_override, max_results_per_query=max_results)
-                st.session_state["reputation_snippets"] = snippets
-                if snippets:
-                    st.info(f"Found {len(snippets)} web snippets. Running LLM analysis...")
-                    with st.spinner("LLM is analysing public perception..."):
-                        rep_summary = summarize_reputation(
-                            rep_name_override, snippets, ollama_url, _rep_model
-                        )
-                    st.session_state["reputation_summary"] = rep_summary
-                    st.success("Reputation profile ready.")
-                else:
-                    st.warning("No web results returned. Check your internet connection or try a different name.")
-
-            st.divider()
-
-            # --- Manual paste ---
-            st.markdown("**Option 3 — Paste your own text**")
-            manual_rep = st.text_area(
-                "Paste reputation text here",
-                height=120,
-                key="manual_rep_text",
-                placeholder="Paste any text about the institution's public reputation, rankings, reviews, etc.",
-            )
-            if st.button("Analyse Pasted Reputation Text", disabled=not manual_rep.strip()):
-                _rep_model_paste = available_models[0] if available_models else "llama3"
-                with st.spinner("LLM is analysing..."):
-                    manual_snippets = [{"title": "Manual input", "snippet": manual_rep}]
-                    rep_summary = summarize_reputation(
-                        inst_for_rep, manual_snippets, ollama_url, _rep_model_paste
-                    )
-                st.session_state["reputation_summary"] = rep_summary
-                st.session_state["reputation_snippets"] = manual_snippets
-                st.success("Reputation profile ready.")
-
-            if st.session_state["reputation_summary"]:
-                st.divider()
-                st.subheader("Reputation Profile")
-                word_count = len(st.session_state["reputation_summary"].split())
-                st.caption(f"{word_count} words — will be passed to curriculum generation")
-                st.markdown(st.session_state["reputation_summary"])
-
-                if st.button("Clear reputation data"):
-                    st.session_state["reputation_snippets"] = []
-                    st.session_state["reputation_summary"] = ""
-                    st.session_state["reputation_nlm_notebook_id"] = ""
-                    st.rerun()
-
     # ---- Status summary ----
     st.divider()
     st.subheader("Setup Status")
@@ -769,9 +653,10 @@ with tab_context:
     st.divider()
     st.subheader("Deep Research")
     st.caption(
-        "Multi-module NotebookLM research — legal framework, competitive landscape, "
-        "student market, institutional history, and strategic analysis. "
-        "Results are automatically injected into curriculum generation."
+        "Six independent NotebookLM research modules — institutional reputation, legal framework, "
+        "competitive landscape, student market, institutional history, and strategic analysis. "
+        "Each module runs 3 targeted web-research passes (~30 sources total) and queries NotebookLM "
+        "for a structured answer. Results are automatically injected into curriculum generation."
     )
 
     _dr_institution = st.session_state.get("_institution", "")
@@ -782,7 +667,7 @@ with tab_context:
     else:
         st.info(f"Researching: **{_dr_institution}** / {_dr_program}")
 
-        # Module selection
+        # Module selection (3 left, 3 right)
         col_mod_l, col_mod_r = st.columns(2)
         for i, mod in enumerate(MODULE_REGISTRY):
             col = col_mod_l if i < 3 else col_mod_r
@@ -798,10 +683,10 @@ with tab_context:
             m["key"] for m in MODULE_REGISTRY
             if st.session_state.get(f"deep_research_mod_{m['key']}", True)
         ]
-        st.caption(f"{len(_selected_keys)} module(s) selected")
+        st.caption(f"{len(_selected_keys)} module(s) selected · 3 research passes per module · ~10 sources per pass")
 
         # Configuration
-        _dr_col1, _dr_col2, _dr_col3, _dr_col4 = st.columns([2, 1, 1, 1])
+        _dr_col1, _dr_col4 = st.columns([3, 1])
         with _dr_col1:
             _dr_extra_urls_raw = st.text_area(
                 "Extra seed URLs (one per line, optional)",
@@ -810,24 +695,9 @@ with tab_context:
                 placeholder="https://en.wikipedia.org/wiki/...\nhttps://www.institution.edu/about",
                 help="Added as sources on top of the NLM-researched sources.",
             )
-        with _dr_col2:
-            _dr_research_mode = st.selectbox(
-                "Research mode",
-                options=["deep", "fast"],
-                index=0,
-                key="deep_research_mode",
-                help="deep: ~5 min, ~40 sources  |  fast: ~30 s, ~10 sources",
-            )
-        with _dr_col3:
-            _dr_research_timeout = st.number_input(
-                "Research timeout (s)", min_value=60, max_value=900,
-                value=420,
-                key="deep_research_research_timeout",
-                help="Total time allowed for NLM web research + source import per module.",
-            )
         with _dr_col4:
             _dr_qry_timeout = st.number_input(
-                "Query timeout (s)", min_value=30, max_value=300, value=120,
+                "Query timeout (s)", min_value=60, max_value=600, value=300,
                 key="deep_research_qry_timeout",
             )
 
@@ -835,6 +705,10 @@ with tab_context:
             "Delete NotebookLM notebooks after research", value=True,
             key="deep_research_cleanup",
         )
+
+        # Auth guard
+        if not _nlm_auth_ok:
+            st.info("Re-authenticate first: type `! nlm login` in the Claude Code prompt.", icon="🔑")
 
         # Run button
         _run_label = f"Run Deep Research ({len(_selected_keys)} module(s))"
@@ -856,17 +730,19 @@ with tab_context:
                         institution_name=_dr_institution,
                         program_name=_dr_program,
                         extra_urls=_extra_urls or None,
-                        research_timeout=int(_dr_research_timeout),
                         query_timeout=int(_dr_qry_timeout),
                         cleanup=_dr_cleanup,
                         progress_callback=_make_cb(_status),
-                        research_mode=_dr_research_mode,
                     )
                     st.session_state["deep_research_results"][_mod_key] = _result
 
                     if _result["status"] == "ok":
                         _ok_count += 1
                         _status.update(label=f"✅ {_mod['title']}", state="complete")
+                        # Reputation module result feeds the reputation_summary slot
+                        if _mod_key == "institutional_reputation":
+                            st.session_state["reputation_summary"] = _result["answer"]
+                            st.session_state["reputation_snippets"] = []
                     else:
                         _status.update(label=f"❌ {_mod['title']}", state="error")
                         st.error(f"Error: {_result['error']}")

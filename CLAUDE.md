@@ -296,3 +296,37 @@ outputs/
 - Test Tab 3 end-to-end: Tab 1 → load skills + agencies → Tab 2 → Tab 3 → generate outcomes → Run Bloom Analysis → confirm chart renders, table populates, approve one refinement → Tab 4 → generate course list (confirm it receives refined outcomes) → Tab 5 → download JSON → confirm `schema_version: "2.0"` and `pedagogy` block present
 - Simplify `pedagogy_context` app: remove Tabs 1–4 (Load, Bloom, Improve, Export); add Load tab that reads `curriculum_export_pedagogy.json` schema v2.0 and reconstructs `analysis_results`/`coverage` from the `pedagogy` block; keep Quality Committee tabs unchanged
 - Add unit tests for `loaders/bloom_outcome_extractor.py`, `analyzers/coverage_analyzer.py`, `exporter/bloom_exporter.py`
+
+---
+
+## Session Log — 2026-05-03
+
+### Changes Made
+- **Reputation section moved from Tab 1 → Tab 2** — removed entire "Institutional Reputation (Public Perception)" expander (NotebookLM button, DuckDuckGo fallback, manual paste) from Tab 1; reputation is now researched exclusively through the unified Deep Research engine in Tab 2
+- **6-module deep research** — added `institutional_reputation` as module 0 in `MODULE_REGISTRY` (was 5 modules, now 6); when the reputation module succeeds, its answer is stored in `st.session_state["reputation_summary"]` so it flows into all downstream generation prompts unchanged
+- **Multi-pass fast research replaces deep/fast toggle** — removed research mode dropdown and research timeout input from Tab 2 UI; each module now always runs 3 targeted fast-research passes (~10 sources each, ~30 total per module) via `_run_one_pass` / `_run_all_passes` helpers in `deep_research_loader.py`
+- **`loaders/nlm_client.py`** (new file) — extracted shared `NotebookLMClient` factory; `check_auth()` checks token age (warns if >7 days); `get_nlm_client()` loads cookies + metadata, creates client, and patches the underlying `httpx.Client` default timeout from 30 s → 120 s to prevent `get_notebook()` read timeouts on notebooks with many sources
+- **NLM timeout hardening** — `poll_research` calls in `_run_one_pass` wrapped in try/except; transient network timeouts are logged as warnings and polling continues; `add_text_source(wait=True)` also wrapped gracefully
+- **Bloom outcome extractor fixed for Continuous Education** — `bloom_outcome_extractor.py` only knew `# Program Educational Objectives` and `# Student Learning Outcomes`; CE programs generate `# Learning Objectives` which produced 0 matches; extractor now handles 6 heading variants (`Learning Objectives`, `Learning Outcomes`, `Program Outcomes`, `Course Outcomes`, `Competencies`) plus a fallback that collects all numbered list items with 5+ words when no recognised heading is found
+- **Import cleanup** — removed unused `from loaders.reputation_loader_nlm import fetch_reputation_via_notebooklm`, `from loaders.reputation_loader import fetch_reputation_snippets`, and `summarize_reputation` from `app.py` top-level imports
+- **Encoding fix** — corrected `U+2026` (`…`) replacement character corruption in `deep_research_loader.py` that caused a `SyntaxError` at startup
+
+### Decisions & Rationale
+- Reputation moved to Tab 2 (not deleted) because it belongs with all other NLM research; running it as a named module means its findings appear in the Research Results section alongside the other five modules, giving the user a single place to review all intelligence before generation
+- Multi-pass fast research always used (no user-selectable deep mode) because deep mode returns `code 8` (quota/feature restriction) on the Workspace Google account in use; 3 × fast = ~30 sources per module, comparable to deep mode's ~40
+- httpx client timeout patched in `get_nlm_client()` rather than in individual call sites — one change covers all `_call_rpc` invocations that lack explicit timeouts (`get_notebook`, `poll_research`, `create_notebook`, etc.) without requiring library modifications
+- Bloom extractor uses a priority list of heading patterns (most specific first, fallback last) with deduplication — ensures outcomes are not double-counted if the LLM happens to use both `# Learning Outcomes` and `# Student Learning Outcomes` headings
+
+### Known Issues / TODOs
+- Deep research results are still not cached to disk — `utils/deep_research_cache.py` remains a TODO
+- No per-module re-run button in Tab 2 (Deep Research); users must deselect and rerun the full set
+- `curriculum_exporter.py` and new Bloom modules have no unit tests yet
+- JSON export not auto-triggered at end of generation pipeline
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+- `reputation_loader_nlm.py` is imported by nothing in `app.py` now but kept for potential programmatic use
+
+### Next Session Starting Point
+- Run full end-to-end with a CE program: Tab 1 → load skills + agencies → Tab 2 → run reputation + 1-2 research modules → Tab 3 → generate outcomes → confirm Bloom analysis finds all outcomes → Tab 4 → generate course list → Tab 5 → export JSON
+- Implement `utils/deep_research_cache.py` to persist deep research results between browser sessions (same pattern as `institutional_cache.py`)
+- Add unit tests for `loaders/bloom_outcome_extractor.py` — especially the CE heading variant and fallback path
+- Consider auto-saving `curriculum_export.json` at the end of each generation step (not only on manual Export tab click)

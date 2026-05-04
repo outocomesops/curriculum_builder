@@ -3,34 +3,62 @@ Deep Research Loader
 ====================
 Runs multi-module NotebookLM research on a higher-education institution.
 
-Each module:
-  1. Creates its own NLM notebook
-  2. Adds a text seed source
-  3. Uses NLM's native deep-research (`nlm research start --auto-import`) so
-     NLM itself discovers and ingests ~40 real web sources — no external search
-     library needed
-  4. Optionally adds any caller-supplied extra URLs
-  5. Queries the notebook
-  6. Cleans up
+Each module runs 3 targeted fast-research passes on its own notebook,
+giving ~30 web sources per module (equivalent coverage to deep research).
+Deep research mode is not available on all Google accounts (returns API
+error code 8); multi-pass fast research is the robust alternative.
 
-Module-level isolation means one failure never blocks the others.
-Add new modules by appending dicts to MODULE_REGISTRY — no other code changes needed.
+Each module is independent — one failure never blocks the others.
+Add new modules by appending dicts to MODULE_REGISTRY.
 """
 from __future__ import annotations
 
-import json
-import re
-import subprocess
+import time
 from typing import Callable
 
-DEFAULT_RESEARCH_TIMEOUT: int = 420   # 7 min covers NLM deep mode (~5 min) + import
-DEFAULT_QUERY_TIMEOUT: int = 120
+from .nlm_client import AUTH_HINT, get_nlm_client
+
+DEFAULT_QUERY_TIMEOUT: int = 300       # streaming query can take 2-3 min
+_PASS_TIMEOUT: int = 120               # per research pass (fast completes in ~30s)
+_POLL_INTERVAL: int = 10              # seconds between status polls
+_INTER_PASS_DELAY: int = 4            # seconds between consecutive research passes
 
 # ---------------------------------------------------------------------------
 # Research module registry
+# Each module has three research_queries covering different angles of the
+# same topic. Running all three fast-research passes gives ~30 sources,
+# matching the breadth of deep research.
 # ---------------------------------------------------------------------------
 
 MODULE_REGISTRY: list[dict] = [
+    {
+        "key": "institutional_reputation",
+        "title": "Institutional Reputation",
+        "icon": "⭐",
+        "description": (
+            "Public perception, student reviews, rankings, graduate outcomes, "
+            "community relations, and notable news about the institution."
+        ),
+        "research_queries": [
+            "{institution_name} student reviews ratings experience programs quality satisfaction",
+            "{institution_name} graduate outcomes employment alumni reputation community",
+            "{institution_name} rankings awards news international students public perception",
+        ],
+        "seed_text_template": (
+            "{institution_name} is a higher education institution offering {program_name}. "
+            "This research covers the public reputation, student experience, graduate outcomes, "
+            "community standing, and general perception of {institution_name}."
+        ),
+        "query_template": (
+            "What do students, graduates, employers, and the general public think about "
+            "{institution_name}? Provide a comprehensive reputation summary covering: overall "
+            "public sentiment (positive/negative/mixed), specifically praised programs or "
+            "services, commonly cited criticisms or concerns, graduate employment outcomes and "
+            "alumni success stories, community relationships and social standing, notable "
+            "rankings or awards, any significant recent news or events, and international "
+            "student experience if relevant. Be specific and cite notable details from the sources."
+        ),
+    },
     {
         "key": "legal_framework",
         "title": "Legal Framework & Regulations",
@@ -40,9 +68,11 @@ MODULE_REGISTRY: list[dict] = [
             "and quality assurance frameworks governing the institution and its country's "
             "higher-education sector."
         ),
-        "research_query_template": (
-            "{institution_name} higher education accreditation regulations legal requirements {program_name}"
-        ),
+        "research_queries": [
+            "{institution_name} higher education accreditation regulations requirements",
+            "{institution_name} government policy compliance student protection legislation",
+            "higher education regulatory framework {program_name} accreditation standards quality",
+        ],
         "seed_text_template": (
             "{institution_name} is a higher education institution offering {program_name}. "
             "This research covers the legal and regulatory framework governing higher education "
@@ -66,9 +96,11 @@ MODULE_REGISTRY: list[dict] = [
             "Main competitors, program comparison, market positioning, "
             "tuition benchmarks, and enrollment data."
         ),
-        "research_query_template": (
-            "{institution_name} {program_name} competitors peer institutions ranking tuition comparison"
-        ),
+        "research_queries": [
+            "{institution_name} {program_name} competitors peer institutions comparison",
+            "{institution_name} tuition enrollment market share position rankings",
+            "{program_name} programs colleges universities rankings comparison differentiation",
+        ],
         "seed_text_template": (
             "{institution_name} offers {program_name}. "
             "This research examines the competitive higher education landscape, identifying peer "
@@ -91,9 +123,11 @@ MODULE_REGISTRY: list[dict] = [
             "Target student demographics, enrollment trends, graduate employment outcomes, "
             "and how the institution is perceived by employers and prospective students."
         ),
-        "research_query_template": (
-            "{institution_name} graduate employment outcomes salary employer perception student reviews {program_name}"
-        ),
+        "research_queries": [
+            "{institution_name} graduate employment outcomes salary employers",
+            "{institution_name} student enrollment demographics recruitment international",
+            "{institution_name} {program_name} industry partnerships employer perception brand",
+        ],
         "seed_text_template": (
             "{institution_name} offers {program_name}. "
             "This research covers how students, prospective applicants, graduates, and employers "
@@ -117,9 +151,11 @@ MODULE_REGISTRY: list[dict] = [
             "Founding story, key milestones, mission evolution, pedagogical traditions, "
             "and the cultural identity that shapes how the institution operates."
         ),
-        "research_query_template": (
-            "{institution_name} history founding milestones mission values identity"
-        ),
+        "research_queries": [
+            "{institution_name} history founding milestones achievements",
+            "{institution_name} mission values strategic direction pedagogy",
+            "{institution_name} identity culture traditions institutional evolution",
+        ],
         "seed_text_template": (
             "{institution_name} is a higher education institution. "
             "This research covers its founding history, key institutional milestones, evolution "
@@ -143,9 +179,11 @@ MODULE_REGISTRY: list[dict] = [
             "Institution as a rational actor: incentive structures, competitive dynamics, "
             "responses to policy and market pressures, and strategic decision-making patterns."
         ),
-        "research_query_template": (
-            "{institution_name} strategic plan priorities enrollment trends market position new programs"
-        ),
+        "research_queries": [
+            "{institution_name} strategic plan growth expansion new programs initiatives",
+            "{institution_name} competitive strategy enrollment market position response",
+            "{institution_name} government funding policy adaptation partnerships",
+        ],
         "seed_text_template": (
             "{institution_name} operates in a competitive and regulated higher education market. "
             "This research analyses the institution's strategic decision-making patterns, how it "
@@ -167,102 +205,85 @@ MODULE_REGISTRY: list[dict] = [
 
 
 # ---------------------------------------------------------------------------
-# Internal NLM CLI helpers
+# Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run_nlm(args: list[str], timeout: int = 180) -> tuple[str, str, int]:
-    result = subprocess.run(
-        ["nlm"] + args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    return result.stdout, result.stderr, result.returncode
-
-
-def _create_notebook(title: str) -> str:
-    stdout, stderr, rc = _run_nlm(["notebook", "create", title], timeout=60)
-    if rc != 0:
-        raise RuntimeError(f"nlm notebook create failed (rc={rc}): {stderr.strip() or stdout.strip()}")
-    match = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", stdout)
-    if not match:
-        raise RuntimeError(f"Could not extract notebook ID from output: {stdout.strip()}")
-    return match.group(0)
-
-
-def _add_text_source(notebook_id: str, text: str, title: str, timeout: int = 60) -> None:
-    _, stderr, rc = _run_nlm(
-        ["source", "add", notebook_id, "--text", text, "--title", title, "--wait"],
-        timeout=timeout,
-    )
-    if rc != 0:
-        raise RuntimeError(f"nlm source add (text) failed (rc={rc}): {stderr.strip()}")
-
-
-def _run_nlm_research(
-    notebook_id: str,
-    query: str,
-    mode: str = "deep",
-    timeout: int = DEFAULT_RESEARCH_TIMEOUT,
-) -> tuple[str, str, int]:
-    """
-    Triggers NLM's native web research for the given query and waits until
-    all discovered sources are imported into the notebook.
-
-    --auto-import blocks the subprocess until research completes and sources
-    are ingested — no separate status/import step needed.
-    """
-    return _run_nlm(
-        ["research", "start", query,
-         "--notebook-id", notebook_id,
-         "--mode", mode,
-         "--auto-import"],
-        timeout=timeout,
-    )
-
-
-def _add_url_sources_best_effort(
-    notebook_id: str,
-    urls: list[str],
-    timeout: int = 90,
-) -> list[str]:
-    """Add caller-supplied extra URLs on top of NLM-researched sources."""
-    succeeded = []
-    for url in urls:
-        try:
-            _, _, rc = _run_nlm(
-                ["source", "add", notebook_id, "--url", url, "--wait", "--wait-timeout", "60"],
-                timeout=timeout,
-            )
-            if rc == 0:
-                succeeded.append(url)
-        except Exception:
-            pass
-    return succeeded
-
-
-def _query_notebook(notebook_id: str, question: str, timeout: int = 120) -> str:
-    stdout, stderr, rc = _run_nlm(
-        ["notebook", "query", "--json", notebook_id, question],
-        timeout=timeout,
-    )
-    if rc != 0:
-        raise RuntimeError(f"nlm notebook query failed (rc={rc}): {stderr.strip() or stdout.strip()}")
+def _safe_delete(client, notebook_id: str) -> None:
+    if not notebook_id:
+        return
     try:
-        data = json.loads(stdout)
-        answer = data.get("value", {}).get("answer", "") or data.get("answer", "")
-        if answer:
-            return answer
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    return stdout.strip()
-
-
-def _delete_notebook(notebook_id: str) -> None:
-    try:
-        _run_nlm(["notebook", "delete", "-y", notebook_id], timeout=30)
+        client.delete_notebook(notebook_id)
     except Exception:
         pass
+
+
+def _run_one_pass(
+    client,
+    notebook_id: str,
+    query: str,
+    pass_num: int,
+    total_passes: int,
+    cb: Callable[[str], None],
+) -> int:
+    """Run one fast-research pass, poll to completion, import sources. Returns source count."""
+    cb(f"Pass {pass_num}/{total_passes}: searching - \"{query[:70]}...\"")
+
+    try:
+        task = client.start_research(notebook_id, query=query, source="web", mode="fast")
+    except Exception as exc:
+        cb(f"Pass {pass_num} failed to start: {str(exc)[:100]} — skipping.")
+        return 0
+
+    if not task:
+        cb(f"Pass {pass_num} did not start — skipping.")
+        return 0
+
+    task_id = task.get("task_id")
+    deadline = time.time() + _PASS_TIMEOUT
+
+    while time.time() < deadline:
+        try:
+            status_data = client.poll_research(
+                notebook_id, target_task_id=task_id, target_query=query
+            )
+        except Exception as poll_exc:
+            # Transient network timeout on the poll call — keep waiting
+            cb(f"Pass {pass_num} poll warning: {str(poll_exc)[:80]} — retrying...")
+            time.sleep(_POLL_INTERVAL)
+            continue
+
+        status = (status_data or {}).get("status", "")
+        if status == "completed":
+            sources_found = (status_data or {}).get("sources", [])
+            try:
+                client.import_research_sources(notebook_id, task_id, sources_found)
+            except Exception as exc:
+                cb(f"Pass {pass_num} import warning: {str(exc)[:80]}")
+            cb(f"Pass {pass_num} done — {len(sources_found)} source(s) imported.")
+            return len(sources_found)
+        elif status in ("failed", "error"):
+            cb(f"Pass {pass_num} ended with status '{status}'.")
+            return 0
+        time.sleep(_POLL_INTERVAL)
+
+    cb(f"Pass {pass_num} timed out.")
+    return 0
+
+
+def _run_all_passes(
+    client,
+    notebook_id: str,
+    research_queries: list[str],
+    cb: Callable[[str], None],
+) -> int:
+    """Run all research passes sequentially. Returns total source count."""
+    total = 0
+    for i, query in enumerate(research_queries, 1):
+        total += _run_one_pass(client, notebook_id, query, i, len(research_queries), cb)
+        if i < len(research_queries):
+            time.sleep(_INTER_PASS_DELAY)
+    cb(f"All {len(research_queries)} passes complete — {total} source(s) total.")
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -274,23 +295,20 @@ def run_research_module(
     institution_name: str,
     program_name: str,
     extra_urls: list[str] | None = None,
-    research_timeout: int = DEFAULT_RESEARCH_TIMEOUT,
     query_timeout: int = DEFAULT_QUERY_TIMEOUT,
     cleanup: bool = True,
     progress_callback: Callable[[str], None] | None = None,
-    research_mode: str = "deep",
 ) -> dict:
     """
-    Runs one research module end-to-end against NotebookLM.
+    Run one research module end-to-end against NotebookLM.
 
-    Uses NLM's native web research (`nlm research start --mode <mode> --auto-import`)
-    to discover and ingest real sources — NLM finds its own references rather
-    than relying on an external search library.
+    Runs 3 fast-research passes on a dedicated notebook (≈30 sources),
+    then queries the notebook for a structured answer.
 
-    Returns a dict with keys:
+    Never raises — all exceptions are caught and returned in "error" field.
+
+    Returns dict with keys:
       module_key, status ("ok"|"error"), answer, error, notebook_id, sources_added
-
-    Never raises — all exceptions are caught and returned in the "error" field.
     """
     def _cb(msg: str) -> None:
         if progress_callback:
@@ -307,9 +325,10 @@ def run_research_module(
     seed_text = module["seed_text_template"].format(
         institution_name=institution_name, program_name=program_name
     )
-    research_query = module["research_query_template"].format(
-        institution_name=institution_name, program_name=program_name
-    )
+    research_queries = [
+        q.format(institution_name=institution_name, program_name=program_name)
+        for q in module["research_queries"]
+    ]
     query = module["query_template"].format(
         institution_name=institution_name, program_name=program_name
     )
@@ -318,62 +337,71 @@ def run_research_module(
     sources_added = 0
 
     try:
+        client = get_nlm_client()
+
         # Step 1: create notebook
         _cb("Creating NotebookLM notebook…")
-        notebook_id = _create_notebook(
-            f"DeepResearch: {module['title']} — {institution_name}"
-        )
+        nb = client.create_notebook(title=f"Research: {module['title']} — {institution_name}")
+        notebook_id = nb.id
 
-        # Step 2: add text seed so notebook always has baseline context
-        _cb("Adding text seed source…")
-        _add_text_source(notebook_id, seed_text, title="Research seed", timeout=60)
+        # Step 2: text seed (guarantees at least one source)
+        _cb("Adding context seed...")
+        try:
+            client.add_text_source(notebook_id, text=seed_text, title="Research seed", wait=True)
+        except Exception as exc:
+            _cb(f"Seed add warning: {str(exc)[:80]} — continuing anyway.")
 
-        # Step 3: NLM native web research — NLM discovers and imports its own sources
-        mode_label = "deep (~5 min, ~40 sources)" if research_mode == "deep" else "fast (~30 s, ~10 sources)"
-        _cb(f'Running NLM {mode_label} research: "{research_query}"...')
-        stdout, stderr, rc = _run_nlm_research(
-            notebook_id, research_query, mode=research_mode, timeout=research_timeout
-        )
-        if rc != 0:
-            _cb(f"NLM research warning (rc={rc}): {stderr.strip()[:200] or stdout.strip()[:200]}")
-        else:
-            # Try to count imported sources from output
-            count_match = re.search(r"(\d+)\s+source", stdout, re.IGNORECASE)
-            if count_match:
-                sources_added = int(count_match.group(1))
-                _cb(f"NLM research complete — {sources_added} source(s) imported.")
-            else:
-                _cb("NLM research complete.")
+        # Step 3: multi-pass fast research (~30 sources across 3 passes)
+        sources_added = _run_all_passes(client, notebook_id, research_queries, _cb)
 
-        # Step 4: add caller-supplied extra URLs (bonus, best-effort)
+        # Step 4: extra URLs (best-effort, on top of research sources)
         if extra_urls:
             _cb(f"Adding {len(extra_urls)} extra URL(s)…")
-            added = _add_url_sources_best_effort(notebook_id, extra_urls)
-            sources_added += len(added)
-            _cb(f"{len(added)}/{len(extra_urls)} extra URL(s) ingested.")
+            added = 0
+            for url in extra_urls:
+                try:
+                    client.add_url_source(notebook_id, url=url, wait=True)
+                    added += 1
+                except Exception:
+                    pass
+            sources_added += added
+            if added:
+                _cb(f"{added}/{len(extra_urls)} extra URL(s) added.")
 
-        # Step 5: query
-        _cb("Querying NotebookLM…")
-        answer = _query_notebook(notebook_id, query, timeout=query_timeout)
+        # Step 5: query the notebook
+        _cb("Querying NotebookLM — this may take 2-3 minutes…")
+        result = client.query(notebook_id, query, timeout=query_timeout)
+        answer = (result or {}).get("answer", "") if isinstance(result, dict) else str(result or "")
 
         if cleanup:
             _cb("Cleaning up notebook…")
-            _delete_notebook(notebook_id)
+            _safe_delete(client, notebook_id)
+            notebook_id = ""
 
         return {
             "module_key": module_key, "status": "ok",
             "answer": answer, "error": "",
-            "notebook_id": "" if cleanup else notebook_id,
+            "notebook_id": notebook_id,
             "sources_added": sources_added,
         }
 
     except Exception as exc:
-        _delete_notebook(notebook_id)
+        try:
+            _safe_delete(client, notebook_id)
+        except Exception:
+            pass
+        err = str(exc)
+        if "Authentication" in err or "expired" in err.lower() or "login" in err.lower():
+            err = AUTH_HINT
+        elif "code 8" in err or "UserDisplayableError" in err:
+            err = (
+                "NotebookLM returned quota error (code 8). "
+                "This is usually a transient rate-limit. Wait 1-2 minutes and try again."
+            )
         return {
             "module_key": module_key, "status": "error",
-            "answer": "", "error": str(exc),
-            "notebook_id": notebook_id,
-            "sources_added": sources_added,
+            "answer": "", "error": err,
+            "notebook_id": notebook_id, "sources_added": sources_added,
         }
 
 
@@ -381,10 +409,7 @@ def build_deep_research_context(
     research_results: dict,
     selected_modules: list[str] | None = None,
 ) -> str:
-    """
-    Formats successful module results into a prompt-injectable string.
-    Only modules with status=="ok" are included.
-    """
+    """Format successful module results into a prompt-injectable string."""
     if not research_results:
         return "No deep research data available."
 

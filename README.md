@@ -20,8 +20,7 @@ Once outcomes are generated, the built-in Bloom's Taxonomy analyser classifies e
 - **Accreditation standards integration** — reads structured `quality_definition.json` files from a multi-agency quality assurance library; filters by program scope and jurisdiction
 - **Institutional document summarisation** — extracts and consolidates content from PDF, DOCX, and TXT policy files using an Ollama LLM; caches the consolidated profile per institution
 - **Program specifications loader** — ingests any stakeholder materials folder: Excel, Word, PDF, PowerPoint, images (via Ollama vision), video/audio (via Whisper), CSV, TXT
-- **Institutional reputation research** — profiles the institution via NotebookLM native web research (`nlm research start --auto-import`) or DuckDuckGo + Ollama; injects findings into generation prompts
-- **Deep research engine** — runs up to 5 NotebookLM research modules: Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis; NLM discovers and ingests its own real web sources (deep mode: ~40 sources; fast: ~10)
+- **Six-module deep research engine** — Tab 2 runs six independent NotebookLM research modules: Institutional Reputation, Legal Framework, Competitive Landscape, Student Market & Employer Perception, Institutional History, Strategic Analysis; each module runs 3 targeted fast-research passes (~10 sources per pass, ~30 total) and queries NotebookLM for a structured answer; all six results are injected into generation prompts
 - **Bloom's Taxonomy analysis** — classifies every learning outcome by cognitive level (remember → create), flags weak/unmeasurable verbs, displays a distribution bar chart, and offers AI-assisted rewriting of flagged outcomes before course generation begins
 - **Three-step curriculum generation** — sequential LLM pipeline (Tab 4): course list → competency map → individual syllabi; outcomes are authored in Tab 3
 - **PDF export** — saves full curriculum or individual sections as formatted PDFs in a dated folder hierarchy (`outputs/{Institution}/{YYYY-MM}/{Program}/`)
@@ -94,10 +93,10 @@ The app opens at `http://localhost:8501` (or the next available port).
 The app is divided into five tabs, intended to be used in order:
 
 **Tab 1 — Sources & Setup**
-Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs. Optionally run a reputation research query via NotebookLM.
+Set the institution name, program name, and level. Load job market skills from `jobs.db`, quality standards from the accreditation library, program specification documents from a folder, and institutional policy PDFs.
 
 **Tab 2 — Context & Research**
-The central intelligence tab. Review loaded skills and agency requirements, summarise and consolidate institutional documents, and run the five NotebookLM deep research modules (Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis). Deep research results are automatically injected into generation prompts. The full assembled LLM context is visible for inspection.
+The central intelligence tab. Review loaded skills and agency requirements, summarise and consolidate institutional documents (with per-institution disk cache), and run all six NotebookLM deep research modules: Institutional Reputation, Legal Framework, Competitive Landscape, Student Market, Institutional History, Strategic Analysis. Each module runs 3 fast-research passes and queries NotebookLM for a structured answer. The reputation module result is also stored as the program's reputation profile for injection into generation prompts. The full assembled LLM context is visible for inspection.
 
 **Tab 3 — Outcomes & Bloom**
 Three-step sub-pipeline: (1) Generate learning outcomes from all gathered context — streams live. (2) Run Bloom's Taxonomy analysis — classifies every outcome by cognitive level, shows KPI metrics, a level distribution bar chart, and a filterable outcome table with flags. (3) Refine flagged outcomes — for each outcome with weak or unmeasurable verbs, generate an AI-written rewrite and approve it to replace the original in the learning outcomes text.
@@ -114,7 +113,7 @@ Save the full curriculum or individual sections as PDFs. Download the curriculum
 
 ```
 curriculum_builder/
-├── app.py                        Streamlit entrypoint — 4 tabs
+├── app.py                        Streamlit entrypoint — 5 tabs
 ├── config.py                     Constants: Ollama URL, output paths, languages, program levels
 ├── requirements.txt              Python dependencies
 ├── curriculum_export_sample.json Sample JSON export (Lambton College / Software Engineering)
@@ -124,10 +123,11 @@ curriculum_builder/
 │   ├── quality_loader.py         Reads catalog.json + quality_definition.json files
 │   ├── doc_loader.py             Extracts text from PDF/DOCX/TXT institutional docs
 │   ├── program_specs_loader.py   Multi-format loader: Excel, Word, PPTX, images, video, audio
-│   ├── reputation_loader.py      DuckDuckGo web search + Ollama reputation analysis
-│   ├── reputation_loader_nlm.py  NotebookLM-based reputation research via nlm CLI
+│   ├── nlm_client.py             Shared NotebookLMClient factory; auth check; httpx timeout patch
+│   ├── bloom_outcome_extractor.py Parses outcomes markdown → OutcomeRecord list (all heading variants)
+│   ├── bloom_loader.py           Loads bloom_verbs.json + weak_verbs.json into lookup structures
 │   ├── pdf_downloader.py         Scrapes and downloads PDFs from a given webpage URL
-│   └── deep_research_loader.py   Five-module NotebookLM deep research engine
+│   └── deep_research_loader.py   Six-module NotebookLM research engine (3 passes/module, ~30 sources)
 │
 ├── generator/
 │   ├── doc_summarizer.py         LLM summarisation of institutional documents
@@ -221,7 +221,7 @@ See `curriculum_export_sample.json` for a complete worked example.
 - **Ollama must be running** for all generation and summarisation steps; no offline fallback
 - **`nlm login` required** for NotebookLM features; session-based auth expires and must be re-run manually
 - **Deep research results are not cached** to disk — closing the browser tab loses them; `utils/deep_research_cache.py` is a planned addition
-- **NLM deep research takes ~5 minutes per module** (deep mode); use fast mode (~30 s) for quick iteration at the cost of fewer sources
+- **NLM deep research uses fast mode exclusively** (deep mode returns a quota error on the Google Workspace account used); 3 passes × ~10 sources = ~30 sources per module
 - **JSON export requires manual trigger** in Tab 4; it is not auto-saved at the end of each generation step
 - **Video/audio transcription** requires `pip install openai-whisper` and `ffmpeg` on PATH (not in `requirements.txt`)
 - **Competency map** is plain markdown text; a dedicated table renderer would improve readability in the UI
