@@ -8,3 +8,4 @@ duckduckgo-search>=6.0
 beautifulsoup4>=4.12
 openpyxl>=3.1
 python-pptx>=0.6
+scikit-learn>=1.3

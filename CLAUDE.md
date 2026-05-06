@@ -330,3 +330,37 @@ outputs/
 - Implement `utils/deep_research_cache.py` to persist deep research results between browser sessions (same pattern as `institutional_cache.py`)
 - Add unit tests for `loaders/bloom_outcome_extractor.py` — especially the CE heading variant and fallback path
 - Consider auto-saving `curriculum_export.json` at the end of each generation step (not only on manual Export tab click)
+
+---
+
+## Session Log — 2026-05-06
+
+### Changes Made
+- **Agentic RAG on expert knowledge bases** — `loaders/kb_loader.py` (new): chunks all PDFs from `C:\Users\Sebmatecho\Documents\pedagogy_context\knowledge_bases\*/sources/` by expert persona (pedagogical_expert, accreditation_specialist, industry_liaison, student_advocate); `loaders/kb_retriever.py` (new): builds a per-persona TF-IDF index via scikit-learn, runs a non-streaming Ollama call to generate 3 targeted retrieval queries, retrieves top-k chunks, formats them as a `=== EXPERT KNOWLEDGE BASE ===` context block (max 6000 chars); Tab 4 gains a **Load Knowledge Bases** button at top; before each generation step (Course List, Competency Map, Syllabi), queries are generated and relevant chunks are injected into prompts; retrieved excerpts shown in a collapsible expander per step
+- **Program duration (semesters) field** — Tab 1 (Sources & Setup) now shows a **Duration (semesters)** number input for all non-CE programs, with smart defaults by level (Undergraduate=8, Master's=4, Doctoral=6, Diploma=3, Technical=4); hidden for CE programs; saved as `st.session_state["_program_duration_semesters"]`; threaded into all four generation functions — `generate_course_list` replaces hardcoded "8-10 semesters" with the exact user-set value; `generate_competency_map` uses it for semester grouping rules; Tab 4 caption now shows the semester count
+- **Course codes always explicit** — Strengthened `generate_course_list` prompt with a "CRITICAL FORMATTING RULE" block mandating `**[CODE] Course Name**` format for non-CE (CODE = 2-6 uppercase letters + 3-4 digits, e.g. CS101, DATA301) and `**[MOD001] Module Name**` for CE programs; CE `MOD001` format already matches the existing Step 3 regex — no app.py regex change needed
+- **Export tab simplified** — Removed all PDF export buttons (full curriculum PDF, section PDFs), Markdown download, and in-browser JSON download; Tab 5 now has a single **Save Proposal to Output Folder** primary button; `_export_data` is now built inside the button handler (not unconditionally on every render); output folder path display kept
+- **PDF exporter imports removed from app.py** — `save_section_pdf`, `save_syllabus_pdf`, `save_full_curriculum_pdf`, `_USE_UNICODE`, `_UNICODE_FONT_PATH` no longer imported at app level; sidebar Unicode font status display removed
+- **scikit-learn added to requirements.txt** — `scikit-learn>=1.3` added for TF-IDF retrieval in `kb_retriever.py`
+
+### Decisions & Rationale
+- Agentic RAG uses a separate non-streaming Ollama call (not keyword matching) to generate retrieval queries — makes the retrieval truly context-aware: the LLM decides what the expert knowledge base should contribute for each specific program and step rather than using a fixed query string
+- One TF-IDF index per expert persona (not a single merged index) — preserves attribution per expert; allows the UI to show which persona contributed which chunks; also avoids pedagogical content drowning out accreditation content in a shared index
+- CE modules standardised to `MOD001` (3 letters + 3 digits) instead of the previous `MOD-N` format — MOD001 matches the existing regex `r"\*\*\[?([A-Z]{2,6}\d{3,4}[A-Z]?)\]?\s+([^\*\n]+)\*\*"` without any code change, eliminating the Step 3 manual fallback for CE programs
+- `_export_data` moved inside the button handler — avoids an expensive `build_curriculum_export()` call on every page render; no functional change for the user
+- PDF import block removed from `app.py` entirely — simplifies the module; `pdf_exporter.py` is kept in the codebase for future use but is no longer loaded on startup
+
+### Known Issues / TODOs
+- Deep research results still not cached to disk — `utils/deep_research_cache.py` remains a TODO
+- No per-module re-run button in Tab 2 (Deep Research)
+- `curriculum_exporter.py`, `kb_loader.py`, `kb_retriever.py` have no unit tests yet
+- KB index is stored in session state and rebuilt on every browser refresh; a disk cache (e.g. pickle) would speed up repeat loads across sessions
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+- `pedagogy_context` app simplification still deferred (remove Bloom tabs, keep Quality Committee)
+
+### Next Session Starting Point
+- Test agentic RAG end-to-end: Tab 4 → Load Knowledge Bases (verify chunk count from all 4 personas) → Generate Course List → expand "Knowledge Base excerpts used" expander → confirm chunks from pedagogical_expert and accreditation_specialist appear
+- Verify course code consistency: generate course list → confirm Step 3 auto-detects all codes without falling back to manual entry; try both Undergraduate and CE modes
+- Verify duration consistency: set "6 semesters" in Tab 1 → generate course list → confirm output says "6 semesters" everywhere and not "8-10 semesters" or "2 years"
+- Add unit tests for `loaders/kb_loader.py` and `loaders/kb_retriever.py`
+- Implement `utils/deep_research_cache.py` to persist deep research results between sessions

@@ -51,14 +51,9 @@ from generator.curriculum_gen import (
     generate_competency_map,
     generate_syllabus,
 )
-from exporter.pdf_exporter import (
-    save_section_pdf,
-    save_syllabus_pdf,
-    save_full_curriculum_pdf,
-    _USE_UNICODE,
-    _UNICODE_FONT_PATH,
-)
 from exporter.curriculum_exporter import build_curriculum_export, save_curriculum_export
+from loaders.kb_loader import load_kb_index, total_chunks, KB_ROOT
+from loaders.kb_retriever import build_tfidf_index, build_kb_context, generate_retrieval_queries
 from loaders.bloom_loader import load_bloom_taxonomy
 from loaders.bloom_outcome_extractor import extract_outcomes_from_markdown
 from analyzers.outcome_analyzer import analyze_all_outcomes
@@ -112,6 +107,9 @@ _DEFAULTS = {
     "outcomes": [],           # list[OutcomeRecord]
     "analysis_results": [],   # list[AnalysisResult]
     "coverage": None,         # CoverageReport | None
+    "_program_duration_semesters": None,
+    "kb_index": {},
+    "kb_persona_indices": {},
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -155,11 +153,6 @@ with st.sidebar:
     )
     base_outputs = Path(custom_output)
 
-    st.divider()
-    if _USE_UNICODE:
-        st.caption(f"✅ Unicode font: `{Path(_UNICODE_FONT_PATH).name}`")
-    else:
-        st.caption("⚠️ Latin-1 font only (non-Latin scripts will be approximated)")
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +183,30 @@ with tab_sources:
     with col_inst_c:
         program_level = st.selectbox("Program level", options=PROGRAM_LEVELS)
 
+    _LEVEL_DEFAULT_SEMESTERS = {
+        "Undergraduate": 8,
+        "Graduate (Master's)": 4,
+        "Graduate (Doctoral)": 6,
+        "Postgraduate Diploma": 3,
+        "Technical/Vocational": 4,
+    }
+
     course_hours: int | None = None
+    program_duration_semesters: int | None = None
+
     if program_level == "Continuous Education":
         course_hours = st.number_input(
             "Total course hours",
             min_value=8, max_value=1000, value=40, step=8,
             help="Total contact/instructional hours for the continuing education program.",
+        )
+    else:
+        program_duration_semesters = st.number_input(
+            "Duration (semesters)",
+            min_value=1, max_value=20,
+            value=_LEVEL_DEFAULT_SEMESTERS.get(program_level, 8),
+            step=1,
+            help="Total number of semesters in the program. This value is used consistently in all generation steps.",
         )
 
     st.divider()
@@ -511,6 +522,7 @@ with tab_sources:
     st.session_state["_program"] = program_name
     st.session_state["_program_level"] = program_level
     st.session_state["_course_hours"] = course_hours
+    st.session_state["_program_duration_semesters"] = program_duration_semesters
 
 
 # ============================================================
@@ -1092,6 +1104,7 @@ with tab_generate:
     program_name = st.session_state.get("_program", "")
     program_level = st.session_state.get("_program_level", "Undergraduate")
     course_hours = st.session_state.get("_course_hours")
+    program_duration_semesters = st.session_state.get("_program_duration_semesters")
 
     if not institution_name or not program_name:
         st.warning("Set institution name and program name in **Sources & Setup** first.")
@@ -1101,6 +1114,32 @@ with tab_generate:
         st.info("Generate learning outcomes in **Outcomes & Bloom** (Tab 3) first.")
         st.stop()
 
+    # ---- Expert Knowledge Base ----
+    st.subheader("Expert Knowledge Base")
+    _kb_col1, _kb_col2 = st.columns([2, 5])
+    with _kb_col1:
+        if st.button("Load Knowledge Bases", key="btn_load_kb"):
+            with st.spinner(f"Indexing PDFs from knowledge_bases..."):
+                _kb_index = load_kb_index(KB_ROOT)
+                _kb_persona_indices = build_tfidf_index(_kb_index)
+                st.session_state["kb_index"] = _kb_index
+                st.session_state["kb_persona_indices"] = _kb_persona_indices
+            n_personas = len(_kb_index)
+            n_total = total_chunks(_kb_index)
+            if n_personas:
+                st.success(f"Indexed {n_personas} expert persona(s) — {n_total} chunks ready.")
+            else:
+                st.warning(f"No PDFs found at `{KB_ROOT}`. Check the path.")
+    with _kb_col2:
+        if st.session_state["kb_persona_indices"]:
+            _n_p = len(st.session_state["kb_persona_indices"])
+            _n_c = total_chunks(st.session_state["kb_index"])
+            st.caption(f"✅ {_n_p} expert persona(s) indexed — {_n_c} chunks available")
+        else:
+            st.caption("Knowledge bases not loaded. Click **Load Knowledge Bases** to enable RAG.")
+
+    st.divider()
+
     # Model selector for this tab
     _gen_col1, _gen_col2 = st.columns([2, 5])
     with _gen_col1:
@@ -1109,8 +1148,11 @@ with tab_generate:
         else:
             model_gen = st.text_input("LLM model (generation)", value="llama3", key="model_gen")
 
-    hours_label = f" — {course_hours} contact hours" if program_level == "Continuous Education" and course_hours else ""
-    st.caption(f"Generating for: **{program_name}** ({program_level}{hours_label}) — {institution_name}")
+    _dur_label = (
+        f" — {program_duration_semesters} semesters" if program_duration_semesters
+        else (f" — {course_hours} contact hours" if program_level == "Continuous Education" and course_hours else "")
+    )
+    st.caption(f"Generating for: **{program_name}** ({program_level}{_dur_label}) — {institution_name}")
     st.caption(f"Model: `{model_gen}`  |  Language: {language_label}")
 
     skills_df = st.session_state["skills_df"]
@@ -1166,6 +1208,17 @@ with tab_generate:
     st.subheader("Step 1 — Course List")
     if True:
         if st.button("Generate Course List", type="primary", key="btn_courses"):
+            _kb_ctx_courses = ""
+            if st.session_state["kb_persona_indices"]:
+                with st.spinner("Querying expert knowledge base..."):
+                    _kb_queries = generate_retrieval_queries(
+                        program_name, program_level, "course list design", ollama_url, model_gen
+                    )
+                    _kb_ctx_courses = build_kb_context(st.session_state["kb_persona_indices"], _kb_queries)
+                if _kb_ctx_courses:
+                    with st.expander("Knowledge Base excerpts used (Course List)", expanded=False):
+                        st.markdown(_kb_ctx_courses)
+
             container2 = st.empty()
             full_text2 = ""
             with st.spinner("Generating course list..."):
@@ -1176,6 +1229,8 @@ with tab_generate:
                     course_hours=course_hours,
                     program_specs_context=specs_ctx,
                     deep_research_context=deep_research_ctx,
+                    program_duration_semesters=program_duration_semesters,
+                    kb_context=_kb_ctx_courses,
                 ):
                     full_text2 += chunk
                     container2.markdown(full_text2)
@@ -1199,6 +1254,17 @@ with tab_generate:
         st.info("Complete Step 1 first.")
     else:
         if st.button("Generate Competency Map", type="primary", key="btn_map"):
+            _kb_ctx_map = ""
+            if st.session_state["kb_persona_indices"]:
+                with st.spinner("Querying expert knowledge base..."):
+                    _kb_queries_map = generate_retrieval_queries(
+                        program_name, program_level, "competency mapping and SLO alignment", ollama_url, model_gen
+                    )
+                    _kb_ctx_map = build_kb_context(st.session_state["kb_persona_indices"], _kb_queries_map)
+                if _kb_ctx_map:
+                    with st.expander("Knowledge Base excerpts used (Competency Map)", expanded=False):
+                        st.markdown(_kb_ctx_map)
+
             container3 = st.empty()
             full_text3 = ""
             with st.spinner("Generating competency map..."):
@@ -1207,6 +1273,8 @@ with tab_generate:
                     st.session_state["learning_outcomes"],
                     st.session_state["course_list"],
                     language, ollama_url, model_gen,
+                    program_duration_semesters=program_duration_semesters,
+                    kb_context=_kb_ctx_map,
                 ):
                     full_text3 += chunk
                     container3.markdown(full_text3)
@@ -1283,6 +1351,13 @@ with tab_generate:
                 prog_bar = st.progress(0, "Starting...")
                 syllabi = dict(st.session_state["syllabi"])
 
+                _kb_ctx_syl = ""
+                if st.session_state["kb_persona_indices"]:
+                    _kb_queries_syl = generate_retrieval_queries(
+                        program_name, program_level, "course syllabus design and assessment", ollama_url, model_gen
+                    )
+                    _kb_ctx_syl = build_kb_context(st.session_state["kb_persona_indices"], _kb_queries_syl)
+
                 for idx, label in enumerate(selected_labels):
                     code, name = label.split(" — ", 1)
                     prog_bar.progress((idx + 1) / len(selected_labels), f"Generating: {code}...")
@@ -1291,6 +1366,7 @@ with tab_generate:
                     for chunk in generate_syllabus(
                         code, name, program_name, slo_excerpt,
                         skills_short, language, ollama_url, model_gen,
+                        kb_context=_kb_ctx_syl,
                     ):
                         syl_text += chunk
                         syl_container.markdown(syl_text)
@@ -1339,147 +1415,49 @@ with tab_export:
     else:
         st.divider()
 
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.subheader("Save Full Curriculum PDF")
-            st.caption(
-                "One PDF combining all generated sections and syllabi, "
-                "saved to the output folder structure."
-            )
-            if st.button("Save Full Curriculum PDF", type="primary", key="save_full"):
-                with st.spinner("Building PDF..."):
-                    sections = {}
-                    if outcomes:
-                        sections["Program Overview & Learning Outcomes"] = outcomes
-                    if courses:
-                        sections["Course List"] = courses
-                    if cmap:
-                        sections["Competency Map"] = cmap
-
-                    try:
-                        out_path = save_full_curriculum_pdf(
-                            sections=sections,
-                            syllabi=syllabi,
-                            institution=institution_name,
-                            program_name=program_name,
-                            program_level=program_level,
-                            base_outputs=base_outputs,
-                        )
-                        st.success(f"Saved to:\n`{out_path}`")
-                    except Exception as exc:
-                        st.error(f"PDF generation failed: {exc}")
-
-        with col_b:
-            st.subheader("Save Individual Section PDFs")
-            st.caption("Save each section as a separate PDF file.")
-            if st.button("Save Section PDFs", key="save_sections"):  # noqa
-                saved = []
-                with st.spinner("Building PDFs..."):
-                    section_map = {
-                        "01_Learning_Outcomes": outcomes,
-                        "02_Course_List": courses,
-                        "03_Competency_Map": cmap,
-                    }
-                    for name, content in section_map.items():
-                        if content.strip():
-                            try:
-                                p = save_section_pdf(
-                                    content, name, institution_name,
-                                    program_name, program_level, base_outputs,
-                                )
-                                saved.append(str(p))
-                            except Exception as exc:
-                                st.warning(f"{name}: {exc}")
-                    for code, content in syllabi.items():
-                        if content.strip():
-                            try:
-                                p = save_syllabus_pdf(
-                                    code, content, institution_name,
-                                    program_name, program_level, base_outputs,
-                                )
-                                saved.append(str(p))
-                            except Exception as exc:
-                                st.warning(f"{code}: {exc}")
-                if saved:
-                    st.success(f"Saved {len(saved)} file(s).")
-                    for p in saved:
-                        st.caption(f"  `{p}`")
-
-        st.divider()
-
-        # ---- Plain text download ----
-        st.subheader("Download as Plain Text / JSON")
-        full_md = "\n\n---\n\n".join(filter(None, [outcomes, courses, cmap]))
-        if syllabi:
-            full_md += "\n\n---\n\n# Course Syllabi\n\n"
-            full_md += "\n\n---\n\n".join(syllabi.values())
-
-        safe_prog = program_name.replace(" ", "_")[:40]
-
-        dl_col_md, dl_col_json = st.columns(2)
-        with dl_col_md:
-            st.download_button(
-                label="Download full curriculum as Markdown",
-                data=full_md.encode("utf-8"),
-                file_name=f"curriculum_{safe_prog}.md",
-                mime="text/markdown",
-            )
-        with dl_col_json:
-            _top_n_export = st.session_state.get("top_n_gen", st.session_state.get("top_n_ctx", 40))
-            _export_data = build_curriculum_export(
-                institution_name=institution_name,
-                program_name=program_name,
-                program_level=program_level,
-                language=language,
-                course_hours=st.session_state.get("_course_hours"),
-                skills_df=st.session_state["skills_df"],
-                top_n=_top_n_export,
-                agencies=st.session_state["agencies"],
-                institutional_docs=st.session_state["institutional_docs"],
-                consolidated_summary=st.session_state["consolidated_summary"],
-                reputation_snippets=st.session_state["reputation_snippets"],
-                reputation_summary=st.session_state["reputation_summary"],
-                program_specs_docs=st.session_state.get("program_specs_docs", []),
-                deep_research_results=st.session_state.get("deep_research_results", {}),
-                learning_outcomes=outcomes,
-                course_list=courses,
-                competency_map=cmap,
-                syllabi=syllabi,
-                analysis_results=st.session_state.get("analysis_results") or None,
-                coverage=st.session_state.get("coverage"),
-            )
-            st.download_button(
-                label="Download curriculum_export.json",
-                data=json.dumps(_export_data, ensure_ascii=False, indent=2).encode("utf-8"),
-                file_name=f"curriculum_export_{safe_prog}.json",
-                mime="application/json",
-            )
-
-        st.divider()
-
-        st.subheader("Save JSON to Output Folder")
         st.caption(
-            "Saves `curriculum_export.json` alongside the PDFs in the output folder. "
-            "This is the machine-readable file for downstream applications."
+            "Saves the full proposal as a structured JSON file alongside any future exports. "
+            "This is the machine-readable file used by downstream applications and the expert review panel."
         )
-        if st.button("Save curriculum_export.json", key="save_json"):
+        if st.button("Save Proposal to Output Folder", type="primary", key="save_json"):
+            with st.spinner("Building export..."):
+                _top_n_export = st.session_state.get("top_n_gen", st.session_state.get("top_n_ctx", 40))
+                _export_data = build_curriculum_export(
+                    institution_name=institution_name,
+                    program_name=program_name,
+                    program_level=program_level,
+                    language=language,
+                    course_hours=st.session_state.get("_course_hours"),
+                    skills_df=st.session_state["skills_df"],
+                    top_n=_top_n_export,
+                    agencies=st.session_state["agencies"],
+                    institutional_docs=st.session_state["institutional_docs"],
+                    consolidated_summary=st.session_state["consolidated_summary"],
+                    reputation_snippets=st.session_state["reputation_snippets"],
+                    reputation_summary=st.session_state["reputation_summary"],
+                    program_specs_docs=st.session_state.get("program_specs_docs", []),
+                    deep_research_results=st.session_state.get("deep_research_results", {}),
+                    learning_outcomes=outcomes,
+                    course_list=courses,
+                    competency_map=cmap,
+                    syllabi=syllabi,
+                    analysis_results=st.session_state.get("analysis_results") or None,
+                    coverage=st.session_state.get("coverage"),
+                )
             try:
                 _json_path = save_curriculum_export(
                     _export_data, institution_name, program_name, base_outputs
                 )
                 st.success(f"Saved to:\n`{_json_path}`")
             except Exception as exc:
-                st.error(f"JSON save failed: {exc}")
+                st.error(f"Save failed: {exc}")
 
-        # ---- Output folder info ----
         st.divider()
-        st.subheader("Output Folder Structure")
+        st.subheader("Output Folder")
         from datetime import datetime
         year_month = datetime.now().strftime("%Y-%m")
         safe_inst = re.sub(r"[^\w\s-]", "", institution_name).strip().replace(" ", "_")
         safe_prg = re.sub(r"[^\w\s-]", "", program_name).strip().replace(" ", "_")
         example_path = base_outputs / safe_inst / year_month / safe_prg
         st.code(str(example_path))
-        st.caption("Syllabi are saved in a `syllabi/` subfolder within the program directory.")
 
