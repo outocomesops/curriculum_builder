@@ -351,9 +351,8 @@ outputs/
 - PDF import block removed from `app.py` entirely — simplifies the module; `pdf_exporter.py` is kept in the codebase for future use but is no longer loaded on startup
 
 ### Known Issues / TODOs
-- Deep research results still not cached to disk — `utils/deep_research_cache.py` remains a TODO
 - No per-module re-run button in Tab 2 (Deep Research)
-- `curriculum_exporter.py`, `kb_loader.py`, `kb_retriever.py` have no unit tests yet
+- `curriculum_exporter.py` has no unit tests yet
 - KB index is stored in session state and rebuilt on every browser refresh; a disk cache (e.g. pickle) would speed up repeat loads across sessions
 - Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
 - `pedagogy_context` app simplification still deferred (remove Bloom tabs, keep Quality Committee)
@@ -362,5 +361,33 @@ outputs/
 - Test agentic RAG end-to-end: Tab 4 → Load Knowledge Bases (verify chunk count from all 4 personas) → Generate Course List → expand "Knowledge Base excerpts used" expander → confirm chunks from pedagogical_expert and accreditation_specialist appear
 - Verify course code consistency: generate course list → confirm Step 3 auto-detects all codes without falling back to manual entry; try both Undergraduate and CE modes
 - Verify duration consistency: set "6 semesters" in Tab 1 → generate course list → confirm output says "6 semesters" everywhere and not "8-10 semesters" or "2 years"
-- Add unit tests for `loaders/kb_loader.py` and `loaders/kb_retriever.py`
-- Implement `utils/deep_research_cache.py` to persist deep research results between sessions
+- Add unit tests for `exporter/curriculum_exporter.py`
+
+---
+
+## Session Log — 2026-05-07
+
+### Changes Made
+- **`utils/deep_research_cache.py`** — new module; persists deep research results to `{INSTITUTIONS_DIR}/{institution}/deep_research_cache.json`; cache is keyed by sorted MD5 fingerprint of selected module keys; `load_cache` returns `None` on missing file, fingerprint mismatch, or corrupted JSON; `save_cache` creates parent dirs; same pattern as `institutional_cache.py`
+- **Deep research cache wired into `app.py`** — Tab 2 now checks for a valid cache on render (when `deep_research_results` is empty); offers a "Load from cache" button that restores all module results and syncs `reputation_summary` if the reputation module is present; after a successful run, `dr_save_cache` persists results automatically with a caption showing the cache file path
+- **`tests/test_deep_research_cache.py`** — 12 tests: fingerprint order-independence, sanitised path, save/load round-trip, module mismatch rejection, corrupted-file resilience, parent dir creation
+- **`tests/test_kb_loader.py`** — 13 tests: chunking edge cases, PDF extraction failure handling, persona skipping (`_SKIP_PERSONAS`), index building with mocked `_extract_pdf_text`
+- **`tests/test_kb_retriever.py`** — 13 tests: TF-IDF index build, top-k retrieval, zero-score exclusion, deduplication, context truncation to `_MAX_KB_CONTEXT_CHARS`, human-readable persona labels, query generation with mock responses and fallback paths
+- **Test suite updated** — `test_bloom_outcome_extractor.py`, `test_curriculum_gen.py`, `test_deep_research_loader.py`, `test_reputation_loader_nlm.py` updated to align with current module signatures; **all 203 tests pass**
+
+### Decisions & Rationale
+- Deep research cache uses the same fingerprint + JSON pattern as `institutional_cache.py` — consistent with existing codebase; one pattern to understand and maintain
+- Cache is keyed on module set (not timestamp) — invalidates automatically when the user adds or removes modules, which is the correct behaviour; stale data from a different run configuration is not restored
+- `dr_load_cache` only auto-loads when `deep_research_results` is empty — prevents overwriting a freshly-run result on every re-render; user must explicitly click "Load from cache" to restore
+
+### Known Issues / TODOs
+- No per-module re-run button in Tab 2 (Deep Research)
+- `curriculum_exporter.py` has no unit tests yet
+- KB index is stored in session state and rebuilt on every browser refresh; a disk cache (pickle) would speed up repeat loads
+- Non-Latin-1 scripts still require TTF font addition in `pdf_exporter.py`
+- `pedagogy_context` app simplification still deferred
+
+### Next Session Starting Point
+- Test full pipeline end-to-end: Tab 1 → Tab 2 (run 1-2 modules, close browser, reopen, confirm cache offer appears) → Tab 3 → Tab 4 → Tab 5
+- Test agentic RAG: Tab 4 → Load Knowledge Bases → Generate Course List → expand "Knowledge Base excerpts used" expander
+- Add unit tests for `exporter/curriculum_exporter.py`
