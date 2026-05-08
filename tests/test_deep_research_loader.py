@@ -1,18 +1,20 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from loaders import deep_research_loader as drl
 
-
-class FakeCompletedProcess:
-    def __init__(self, stdout="", stderr="", returncode=0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.returncode = returncode
-
-
 NB_ID = "12345678-aaaa-bbbb-cccc-1234567890ab"
+
+
+def _make_client() -> MagicMock:
+    """Return a mock NLM client pre-configured for a happy-path run."""
+    client = MagicMock()
+    nb = MagicMock()
+    nb.id = NB_ID
+    client.create_notebook.return_value = nb
+    client.query.return_value = {"answer": "Findings."}
+    return client
 
 
 def test_get_module_by_key_returns_none_for_unknown():
@@ -73,17 +75,12 @@ def test_run_research_module_unknown_key_returns_error():
     assert "Unknown module" in r["error"]
 
 
-@patch("loaders.deep_research_loader._delete_notebook")
-@patch("loaders.deep_research_loader._query_notebook")
-@patch("loaders.deep_research_loader._add_url_sources_best_effort")
-@patch("loaders.deep_research_loader._add_text_source")
-@patch("loaders.deep_research_loader._create_notebook")
-def test_run_research_module_success_with_cleanup(
-    mock_create, mock_add_text, mock_add_urls, mock_query, mock_delete
-):
-    mock_create.return_value = NB_ID
-    mock_query.return_value = "Findings."
-    mock_add_urls.return_value = ["https://a"]
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_success_with_cleanup(mock_passes, mock_get_client):
+    client = _make_client()
+    mock_get_client.return_value = client
+    mock_passes.return_value = 12  # sources_added
 
     msgs = []
     res = drl.run_research_module(
@@ -94,63 +91,85 @@ def test_run_research_module_success_with_cleanup(
     )
     assert res["status"] == "ok"
     assert res["answer"] == "Findings."
-    assert res["sources_added"] == 1
-    assert res["notebook_id"] == ""  # cleaned up → blanked out
-    mock_delete.assert_called_once_with(NB_ID)
-    assert len(msgs) >= 3
+    assert res["notebook_id"] == ""  # cleaned up → blanked
+    client.delete_notebook.assert_called_once_with(NB_ID)
+    assert len(msgs) >= 2
 
 
-@patch("loaders.deep_research_loader._delete_notebook")
-@patch("loaders.deep_research_loader._query_notebook")
-@patch("loaders.deep_research_loader._add_text_source")
-@patch("loaders.deep_research_loader._create_notebook")
-def test_run_research_module_no_cleanup_keeps_id(
-    mock_create, mock_add_text, mock_query, mock_delete
-):
-    mock_create.return_value = NB_ID
-    mock_query.return_value = "."
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_no_cleanup_keeps_id(mock_passes, mock_get_client):
+    client = _make_client()
+    mock_get_client.return_value = client
+    mock_passes.return_value = 5
+
     res = drl.run_research_module("legal_framework", "U", "P", cleanup=False)
     assert res["notebook_id"] == NB_ID
-    mock_delete.assert_not_called()
+    client.delete_notebook.assert_not_called()
 
 
-@patch("loaders.deep_research_loader._delete_notebook")
-@patch("loaders.deep_research_loader._create_notebook")
-def test_run_research_module_catches_exception(mock_create, mock_delete):
-    mock_create.side_effect = RuntimeError("nlm not found")
+@patch("loaders.deep_research_loader.get_nlm_client")
+def test_run_research_module_catches_exception(mock_get_client):
+    mock_get_client.side_effect = RuntimeError("nlm not found")
     res = drl.run_research_module("legal_framework", "U", "P")
     assert res["status"] == "error"
     assert "nlm not found" in res["error"]
 
 
-@patch("loaders.deep_research_loader.subprocess.run")
-def test_create_notebook_parses_uuid(mock_run):
-    mock_run.return_value = FakeCompletedProcess(
-        stdout=f"created {NB_ID}", returncode=0
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_extra_urls_added(mock_passes, mock_get_client):
+    client = _make_client()
+    mock_get_client.return_value = client
+    mock_passes.return_value = 8
+
+    drl.run_research_module(
+        "legal_framework", "MyUni", "CS",
+        extra_urls=["https://a.com", "https://b.com"],
+        cleanup=True,
     )
-    assert drl._create_notebook("title") == NB_ID
+    assert client.add_url_source.call_count == 2
 
 
-@patch("loaders.deep_research_loader.subprocess.run")
-def test_create_notebook_raises_on_error(mock_run):
-    mock_run.return_value = FakeCompletedProcess(stderr="bad", returncode=1)
-    with pytest.raises(RuntimeError):
-        drl._create_notebook("title")
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_extra_url_failure_does_not_raise(mock_passes, mock_get_client):
+    client = _make_client()
+    client.add_url_source.side_effect = RuntimeError("blocked")
+    mock_get_client.return_value = client
+    mock_passes.return_value = 5
 
-
-@patch("loaders.deep_research_loader.subprocess.run")
-def test_query_notebook_handles_plain_json(mock_run):
-    mock_run.return_value = FakeCompletedProcess(
-        stdout='{"answer": "plain"}', returncode=0
+    res = drl.run_research_module(
+        "legal_framework", "MyUni", "CS",
+        extra_urls=["https://a.com"],
+        cleanup=True,
     )
-    assert drl._query_notebook(NB_ID, "q") == "plain"
+    assert res["status"] == "ok"
 
 
-@patch("loaders.deep_research_loader.subprocess.run")
-def test_add_url_sources_best_effort_silent_on_exceptions(mock_run):
-    mock_run.side_effect = [
-        FakeCompletedProcess(returncode=0),
-        RuntimeError("network error"),
-    ]
-    got = drl._add_url_sources_best_effort(NB_ID, ["https://a", "https://b"])
-    assert got == ["https://a"]
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_progress_callback_invoked(mock_passes, mock_get_client):
+    client = _make_client()
+    mock_get_client.return_value = client
+    mock_passes.return_value = 10
+
+    messages: list[str] = []
+    drl.run_research_module(
+        "legal_framework", "MyUni", "CS",
+        cleanup=True,
+        progress_callback=messages.append,
+    )
+    assert any("Creating" in m or "notebook" in m.lower() for m in messages)
+
+
+@patch("loaders.deep_research_loader.get_nlm_client")
+@patch("loaders.deep_research_loader._run_all_passes")
+def test_run_research_module_query_dict_answer_extracted(mock_passes, mock_get_client):
+    client = _make_client()
+    client.query.return_value = {"answer": "Detailed findings here."}
+    mock_get_client.return_value = client
+    mock_passes.return_value = 5
+
+    res = drl.run_research_module("legal_framework", "MyUni", "CS")
+    assert res["answer"] == "Detailed findings here."

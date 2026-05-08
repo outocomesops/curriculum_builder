@@ -169,10 +169,10 @@ def test_generate_course_list_standard(mock_stream):
     mock_stream.side_effect = fake
     list(cg.generate_course_list(
         "BSc", "Undergraduate", "outcomes", "skills", "accred",
-        "English", "http://x", "m",
+        "English", "http://x", "m", program_duration_semesters=8,
     ))
     prompt = captured["prompt"]
-    assert "Undergraduate: 8-10 semesters" in prompt
+    assert "8 semesters" in prompt
 
 
 @patch("generator.curriculum_gen._stream")

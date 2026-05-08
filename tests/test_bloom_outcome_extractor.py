@@ -16,17 +16,17 @@ def test_clean_strips_whitespace_and_markers():
     assert boe._clean("  **Text**  ") == "Text"
 
 
-def test_parse_peos_extracts_numbered_items():
-    peos = boe._parse_peos(SAMPLE_MD)
-    assert peos == [
+def test_parse_section_extracts_peos():
+    items = boe._parse_section(SAMPLE_MD, r"#\s*Program Educational Objectives", strip_bold=False)
+    assert items == [
         {"num": 1, "text": "Demonstrate professional communication."},
         {"num": 2, "text": "Apply software engineering practices."},
     ]
 
 
-def test_parse_slos_handles_title_prefix_and_fallback():
-    slos = boe._parse_slos(SAMPLE_MD)
-    assert slos == [
+def test_parse_section_extracts_slos_strips_bold_prefix():
+    items = boe._parse_section(SAMPLE_MD, r"#\s*Student Learning Outcomes", strip_bold=True)
+    assert items == [
         {"num": 1, "text": "Build robust scripts."},
         {"num": 2, "text": "Ethics"},
     ]

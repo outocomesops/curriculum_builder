@@ -25,6 +25,11 @@ from config import (
     BLOOM_LEVEL_ORDER, BLOOM_LEVEL_COLORS, OUTCOME_TYPE_LABELS,
 )
 from utils.institutional_cache import load_cache, save_cache, cache_path
+from utils.deep_research_cache import (
+    load_cache as dr_load_cache,
+    save_cache as dr_save_cache,
+    cache_path as dr_cache_path,
+)
 from loaders.job_loader import get_available_queries, load_skills_from_db, load_skills_from_csv
 from loaders.quality_loader import get_all_scopes, load_agencies_with_quality
 from loaders.doc_loader import load_institutional_docs
@@ -722,6 +727,25 @@ with tab_context:
         if not _nlm_auth_ok:
             st.info("Re-authenticate first: type `! nlm login` in the Claude Code prompt.", icon="🔑")
 
+        # Cache load — offer cached results if they exist for this institution + module set
+        if _dr_institution and _selected_keys and not st.session_state.get("deep_research_results"):
+            _dr_cached = dr_load_cache(INSTITUTIONS_DIR, _dr_institution, _selected_keys)
+            if _dr_cached:
+                _dr_cp = dr_cache_path(INSTITUTIONS_DIR, _dr_institution)
+                st.info(
+                    f"Cached research results found for **{_dr_institution}** "
+                    f"({len(_selected_keys)} module(s) match). Load them to skip re-running.",
+                )
+                st.caption(f"Cache file: `{_dr_cp}`")
+                if st.button("Load from cache", type="primary", key="btn_load_dr_cache"):
+                    st.session_state["deep_research_results"] = _dr_cached
+                    if "institutional_reputation" in _dr_cached:
+                        _rep = _dr_cached["institutional_reputation"]
+                        if _rep.get("status") == "ok":
+                            st.session_state["reputation_summary"] = _rep["answer"]
+                            st.session_state["reputation_snippets"] = []
+                    st.rerun()
+
         # Run button
         _run_label = f"Run Deep Research ({len(_selected_keys)} module(s))"
         if st.button(_run_label, type="primary", disabled=not _selected_keys, key="btn_deep_research"):
@@ -765,6 +789,17 @@ with tab_context:
                 st.success(f"All {_total} module(s) completed successfully.")
             else:
                 st.warning(f"{_ok_count}/{_total} module(s) succeeded.")
+
+            # Persist successful results to disk cache
+            if _ok_count > 0 and _dr_institution:
+                try:
+                    _dr_saved = dr_save_cache(
+                        INSTITUTIONS_DIR, _dr_institution, _selected_keys,
+                        st.session_state["deep_research_results"],
+                    )
+                    st.caption(f"Results cached to `{_dr_saved}`")
+                except Exception:
+                    pass
 
         # Results
         _dr_results = st.session_state.get("deep_research_results", {})
