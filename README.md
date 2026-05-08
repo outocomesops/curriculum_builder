@@ -154,9 +154,10 @@ curriculum_builder/
 │   └── weak_verbs.json           Weak/unmeasurable verb list
 │
 ├── utils/
-│   └── institutional_cache.py    Fingerprints doc set; caches consolidated summaries to disk
+│   ├── institutional_cache.py    Fingerprints doc set; caches consolidated summaries to disk
+│   └── deep_research_cache.py    Persists deep research results between sessions (keyed by institution + module set)
 │
-├── tests/                        pytest test suite (125+ tests across all modules)
+├── tests/                        pytest test suite (203 tests across all modules)
 └── outputs/                      Generated JSON proposals (git-ignored)
 ```
 
@@ -223,8 +224,7 @@ See `curriculum_export_sample.json` for a complete worked example.
 
 - **Ollama must be running** for all generation and summarisation steps; no offline fallback
 - **`nlm login` required** for NotebookLM features; session-based auth expires and must be re-run manually
-- **Deep research results are not cached to disk** — closing the browser tab loses them; `utils/deep_research_cache.py` is a planned addition
-- **KB index rebuilt on every browser refresh** — stored in session state only; a disk cache would speed up repeat loads
+- **KB index rebuilt on every browser refresh** — stored in session state only; a disk pickle cache would speed up repeat loads (deep research results are cached to disk via `utils/deep_research_cache.py` and restored on next session)
 - **NLM deep research uses fast mode exclusively** (deep mode returns a quota error on the Google Workspace account used); 3 passes × ~10 sources = ~30 sources per module
 - **Non-Latin-1 scripts** (Arabic, Chinese, etc.) require adding a TTF font via `pdf.add_font()` in `pdf_exporter.py`
 - **Video/audio transcription** requires `pip install openai-whisper` and `ffmpeg` on PATH (not in `requirements.txt`)
